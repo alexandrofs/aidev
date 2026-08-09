@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^python3 --version && python3 _bmad/scripts/resolve_config\\.py --project-root /Users/alexandrofs/projects/aidev$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
