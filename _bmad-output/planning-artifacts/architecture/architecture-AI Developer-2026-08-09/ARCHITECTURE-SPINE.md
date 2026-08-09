@@ -29,7 +29,7 @@ A solução separa:
 - um consumidor Python que consome eventos persistidos e dispara os fluxos de execução baseados em prompts,
 - um agente de execução que controla a integração com GitHub, a orquestração do sandbox e as interações de revisão.
 
-Esse paradigma mantém a implementação alinhada ao fazer do event store a fonte única de verdade do estado do workflow e ao isolar efeitos colaterais externos em limites de componente explícitos.
+Esse paradigma mantém a implementação alinhada ao fazer do event store a fonte única de verdade do estado do workflow e ao isolar efeitos colaterais externos em limites de componente explícitos. 
 
 ## Invariantes e Regras
 
