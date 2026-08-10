@@ -14,6 +14,7 @@ binds:
   - 'integração com GitHub'
   - 'notificação HITL'
   - 'armazenamento de memória dos agentes'
+  - 'empacotamento OCI/Docker de deployables'
 sources:
   - '_bmad-output/planning-artifacts/prds/prd-AI Developer-2026-08-08/prd.md'
   - 'docs/brief.md'
@@ -73,6 +74,16 @@ Esse paradigma simplificado elimina intermediários mantendo o event store (Post
 - **Binds:** `executor`, `persistence/` (PostgreSQL), contexto do LLM e arquivos de repositório (`project-context.md`)
 - **Prevents:** acoplamento indevido de estado em memória volátil de processo, vazamento de contexto entre execuções e perda de rastreabilidade de decisões e conhecimento
 - **Rule:** a memória dos agentes deve ser mantida em 3 níveis: (1) Curto prazo efêmero durante a sessão de prompt no sandbox `executor`; (2) Estado de workflow, comandos, logs e histórico de eventos persistidos no `PostgreSQL` (event store); (3) Conhecimento persistente de longo prazo mantido em tabelas dedicadas de memória/conhecimento no `PostgreSQL` e sincronizado com arquivos de contexto do repositório (`project-context.md` e `.memlog.md`).
+
+### AD-9 — Extensibilidade do executor via MCPs, Skills e Templates de Prompts
+- **Binds:** `executor/`, sandbox Docker, engine LLM, clientes de ferramentas MCP e biblioteca de prompts
+- **Prevents:** acoplamento rígido (*hardcoding*) de ferramentas e fluxos de agente, e falta de padronização na injeção de contexto/skills
+- **Rule:** o executor deve injetar dinamicamente em cada sessão do sandbox: (1) Servidores e ferramentas MCP configurados para o ambiente; (2) Skills e customizações descobertas no repositório de destino (`.agents/skills/`); (3) Templates de prompts estruturados e versionados para as fases de planejamento, código e revisão.
+
+### AD-10 — Empacotamento e entrega de todos os serviços como imagens OCI/Docker
+- **Binds:** `api/`, `executor/`, `notifications/`, `persistence/` (migrations), pipeline CI/CD e infraestrutura de implantação
+- **Prevents:** estratégias mistas não padronizadas de implantação (ex: misturar bare-metal com containers), inconsistência de ambientes de runtime e dependências implícitas no host
+- **Rule:** todos os componentes implantáveis (`ai-dev-api`, `ai-dev-executor`, `ai-dev-notifications`, `ai-dev-migrations`) devem ser obrigatoriamente compilados e entregues como imagens OCI/Docker independentes, auto-contidas, imutáveis e configuradas via variáveis de ambiente.
 
 ## Convenções de Consistência
 
@@ -155,6 +166,8 @@ As imagens podem ser orquestradas com `docker-compose` ou uma plataforma de cont
 | Notificação HITL e escalonamento | `notifications/` + `persistence/` | AD-5 |
 | Execução em sandbox e validação local | `executor/` | AD-6 |
 | Armazenamento e persistência de memória dos agentes | `executor/` + `persistence/` | AD-8 |
+| Extensibilidade e Capacidades de Agente (MCPs, Skills, Prompts) | `executor/` | AD-9 |
+| Empacotamento e entrega de deployables | `infra/` + todos os serviços | AD-10 |
 
 ## Adiado
 
