@@ -5,14 +5,15 @@ purpose: build-substrate
 altitude: feature
 paradigm: 'orquestração orientada a eventos com fluxo de eventos persistido'
 scope: 'agente autônomo AI Developer MVP'
-status: draft
+status: final
 created: 2026-08-09
-updated: 2026-08-09
+updated: 2026-08-10
 binds:
   - 'ingestão de webhook'
   - 'execução orientada a eventos'
   - 'integração com GitHub'
   - 'notificação HITL'
+  - 'armazenamento de memória dos agentes'
 sources:
   - '_bmad-output/planning-artifacts/prds/prd-AI Developer-2026-08-08/prd.md'
   - 'docs/brief.md'
@@ -23,13 +24,13 @@ companions: []
 
 ## Paradigma de Design
 
-Arquitetura enxuta orientada a eventos, com um fluxo canônico de eventos persistidos.
+Arquitetura enxuta orientada a eventos, com um fluxo canônico de eventos persistidos no PostgreSQL.
 A solução separa:
-- uma API leve de Webhook que recebe e persiste eventos externos do GitHub,
-- um consumidor Python que consome eventos persistidos e dispara os fluxos de execução baseados em prompts,
-- um agente de execução que controla a integração com GitHub, a orquestração do sandbox e as interações de revisão.
+- uma API leve de Webhook (`ai-dev-api`) que recebe, valida, classifica e persiste eventos externos do GitHub no PostgreSQL,
+- um agente de execução (`ai-dev-executor`) que consome eventos de execução diretamente do PostgreSQL via trava de linha (`SKIP LOCKED`), orquestra o sandbox Docker e controla a integração com GitHub,
+- um serviço de notificações (`ai-dev-notifications`) que consome eventos de notificação diretamente do PostgreSQL e entrega os alertas via Telegram.
 
-Esse paradigma mantém a implementação alinhada ao fazer do event store a fonte única de verdade do estado do workflow e ao isolar efeitos colaterais externos em limites de componente explícitos. 
+Esse paradigma simplificado elimina intermediários mantendo o event store (PostgreSQL) como fonte única da verdade e barramento de eventos seguro com idempotência. 
 
 ## Invariantes e Regras
 
@@ -38,10 +39,10 @@ Esse paradigma mantém a implementação alinhada ao fazer do event store a font
 - **Prevents:** perda ou não rastreamento de payloads de webhook e acoplamento direto entre webhook e execução
 - **Rule:** todos os payloads de webhook externos devem ser validados e persistidos atomica-mente antes de qualquer execução ou transição de workflow.
 
-### AD-2 — Processamento de eventos persistidos dirigido por consumidor
-- **Binds:** consumidor de eventos, despachante de prompts, estado do workflow de execução
-- **Prevents:** execução paralela não controlada e ramificação de workflow não auditável
-- **Rule:** um único consumidor deve reivindicar cada evento, registrar transições de estado e só então despachar o fluxo de prompt/execução correspondente.
+### AD-2 — Consumo de eventos persistidos direto por workers via PostgreSQL
+- **Binds:** `api`, `executor`, `notifications`, event store (PostgreSQL)
+- **Prevents:** necessidade de serviço intermediário de processamento (`processor`), acoplamento de comunicação inter-serviço e execuções concorrentes duplicadas
+- **Rule:** os workers (`executor` e `notifications`) devem consumir eventos elegíveis em status `PENDING` diretamente do PostgreSQL filtrando por `event_type`, realizando o claim idempotente por trava de registro (ex: `SKIP LOCKED`) e registrando as transições de estado no banco.
 
 ### AD-3 — Controle de idempotência no consumo de eventos
 - **Binds:** event store, processamento do consumidor, estado de workflow
@@ -68,6 +69,11 @@ Esse paradigma mantém a implementação alinhada ao fazer do event store a font
 - **Prevents:** loops infinitos de correção e reescritas automáticas inseguras
 - **Rule:** a correção de falha de CI deve ser tentada no máximo 3 vezes antes que o evento seja marcado para revisão humana e o workflow pause.
 
+### AD-8 — Armazenamento de memória dos agentes em modelo hierárquico em três níveis
+- **Binds:** `executor`, `persistence/` (PostgreSQL), contexto do LLM e arquivos de repositório (`project-context.md`)
+- **Prevents:** acoplamento indevido de estado em memória volátil de processo, vazamento de contexto entre execuções e perda de rastreabilidade de decisões e conhecimento
+- **Rule:** a memória dos agentes deve ser mantida em 3 níveis: (1) Curto prazo efêmero durante a sessão de prompt no sandbox `executor`; (2) Estado de workflow, comandos, logs e histórico de eventos persistidos no `PostgreSQL` (event store); (3) Conhecimento persistente de longo prazo mantido em tabelas dedicadas de memória/conhecimento no `PostgreSQL` e sincronizado com arquivos de contexto do repositório (`project-context.md` e `.memlog.md`).
+
 ## Convenções de Consistência
 
 | Preocupação | Convenção |
@@ -91,11 +97,10 @@ Esse paradigma mantém a implementação alinhada ao fazer do event store a font
 
 ```text
 {project-root}/
-  api/                # receptor de webhook, validação de evento, persistência de evento
-  processor/          # consumidor de eventos, claim/dispatch do workflow, política de retry
-  executor/           # orquestração de sandbox, executor de prompts, integração com GitHub
+  api/                # receptor de webhook, validação de evento, classificação e persistência
+  executor/           # consumidor de eventos de execução, orquestração de sandbox, integração GitHub
   persistence/        # esquema de evento, abstrações de repositório, logs de auditoria, migrações
-  notifications/      # canais Telegram/HITL, templates de notificação, lógica de entrega
+  notifications/      # consumidor de eventos de notificação, integração Telegram/HITL
   infra/              # Dockerfiles, manifests compose, configuração de implantação e runtime
   tests/              # testes de integração e contrato para workflow e execução lógica
   docs/               # documentação de arquitetura, operação e implantação
@@ -107,33 +112,30 @@ Esse paradigma mantém a implementação alinhada ao fazer do event store a font
 C4Container
     title AI Developer MVP - Diagrama de Containers
     Person_Ext(github, "GitHub", "Plataforma externa de Webhooks, Issues, PRs e Projects")
+    Person_Ext(user, "Desenvolvedor / Reviewer", "Usuário humano recebendo notificações e interagindo via Telegram")
 
     System_Boundary(mvp, "AI Developer MVP") {
-        Container(api, "ai-dev-api", "Python / FastAPI", "Recebe webhooks do GitHub, valida payloads e persiste eventos no banco.")
-        Container(processor, "ai-dev-processor", "Python worker", "Consome eventos persistidos, aplica idempotência e cria comandos de execução.")
-        Container(executor, "ai-dev-executor", "Python worker", "Orquestra o sandbox Docker, executa prompts e interage com GitHub para PR e status.")
-        Container(notifications, "ai-dev-notifications", "Python worker", "Envia notificações HITL via Telegram e registra decisões de notificação.")
-        ContainerDb(db, "PostgreSQL", "Banco de dados", "Armazena eventos, comandos, estado do workflow e auditoria.")
+        Container(api, "ai-dev-api", "Python / FastAPI", "Recebe webhooks do GitHub, valida, rotula o tipo do evento e persiste no banco com status PENDING.")
+        Container(executor, "ai-dev-executor", "Python worker", "Consome eventos de execução diretamente do banco via lock idempotente, orquestra sandbox Docker e interage com GitHub.")
+        Container(notifications, "ai-dev-notifications", "Python worker", "Consome eventos de notificação diretamente do banco e entrega alertas via Telegram.")
+        ContainerDb(db, "PostgreSQL", "Banco de dados / Event Store", "Armazena eventos, estado de workflow, comandos, logs de auditoria e memória de longo prazo.")
     }
 
-    Rel(github, api, "Envia webhook")
-    Rel(api, db, "Persiste evento")
-    Rel(processor, db, "Lê eventos e atualiza estado/commandos")
-    Rel(processor, executor, "Solicita execução de sandbox via event store / comando")
-    Rel(executor, db, "Lê comandos de execução e grava resultados")
+    Rel(github, api, "Envia webhook", "HTTPS")
+    Rel(api, db, "Persiste evento rotulado (status=PENDING)")
+    Rel(executor, db, "Lê/Trava eventos de execução, atualiza estado")
     Rel(executor, github, "Atualiza Issues/PR/Projects", "REST/GraphQL")
-    Rel(executor, notifications, "Solicita ou registra notificações")
-    Rel(notifications, db, "Registra metadados e estado de notificações")
+    Rel(notifications, db, "Lê eventos de notificação, atualiza status de envio")
+    Rel(notifications, user, "Envia mensagem / alerta HITL", "Telegram Bot API")
 ```
 
 ## Módulos implantáveis como imagem Docker
 
 Os componentes principais são entregues como imagens Docker independentes que podem ser orquestradas em um ambiente local, de CI ou em um cluster leve.
 
-- `ai-dev-api`: serviço HTTP que expõe o endpoint de webhook, valida e persiste eventos de entrada.
-- `ai-dev-processor`: serviço de consumidor de eventos que lê a fila/ tabela de eventos, reivindica eventos, aplica idempotência e dispara fluxos de execução.
-- `ai-dev-executor`: serviço responsável pela orquestração do sandbox Docker, execução dos prompts / engine LLM e integração com GitHub para criar PRs e atualizar cards/issues.
-- `ai-dev-notifications`: serviço de entrega de notificações HITL, responsável por enviar alertas via Telegram e registrar decisões de notificação no event store.
+- `ai-dev-api`: serviço HTTP que expõe o endpoint de webhook, valida, classifica e persiste eventos de entrada no PostgreSQL.
+- `ai-dev-executor`: serviço responsável por consumir eventos de execução do banco, orquestrar o sandbox Docker, executar os prompts / engine LLM e integrar com GitHub para criar PRs e atualizar cards/issues.
+- `ai-dev-notifications`: serviço responsável por consumir eventos de notificação do banco e entregar alertas HITL via Telegram.
 - `ai-dev-migrations`: imagem de utilitário para aplicar migrações de banco de dados e tarefas de manutenção de persistência.
 
 Cada imagem inclui:
@@ -148,10 +150,11 @@ As imagens podem ser orquestradas com `docker-compose` ou uma plataforma de cont
 | Capacidade / Área | Vive em | Governado por |
 | --- | --- | --- |
 | Ingestão e persistência de webhook | `api/` + `persistence/` | AD-1 |
-| Orquestração de execução orientada a eventos | `processor/` | AD-2, AD-7 |
+| Orquestração de execução orientada a eventos | `executor/` + `persistence/` | AD-2, AD-7 |
 | Integração com GitHub Projects / Issue / PR | `executor/` | AD-4 |
-| Notificação HITL e escalonamento | `notifications/` | AD-5 |
-| Execução em sandbox e validação local | `executor/` | AD-5 |
+| Notificação HITL e escalonamento | `notifications/` + `persistence/` | AD-5 |
+| Execução em sandbox e validação local | `executor/` | AD-6 |
+| Armazenamento e persistência de memória dos agentes | `executor/` + `persistence/` | AD-8 |
 
 ## Adiado
 
