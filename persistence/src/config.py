@@ -22,7 +22,9 @@ class DatabaseSettings(BaseSettings):
     def sync_database_url(self) -> str:
         if self.DATABASE_URL:
             url = self.DATABASE_URL
-            if url.startswith("postgresql://"):
+            if url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql+psycopg://", 1)
+            elif url.startswith("postgresql://"):
                 url = url.replace("postgresql://", "postgresql+psycopg://", 1)
             return url
         return f"postgresql+psycopg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
@@ -31,7 +33,9 @@ class DatabaseSettings(BaseSettings):
     def async_database_url(self) -> str:
         if self.DATABASE_URL:
             url = self.DATABASE_URL
-            if url.startswith("postgresql://"):
+            if url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql+psycopg://", 1)
+            elif url.startswith("postgresql://"):
                 url = url.replace("postgresql://", "postgresql+psycopg://", 1)
             elif url.startswith("postgresql+psycopg2://"):
                 url = url.replace("postgresql+psycopg2://", "postgresql+psycopg://", 1)

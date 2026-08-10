@@ -4,7 +4,7 @@ baseline_commit: 2ad61006e0e260093994dc994e44dfc295ae973e
 
 # Story 1.1: Schema do Event Store e Migrações em PostgreSQL (`ai-dev-migrations`)
 
-Status: review
+Status: done
 
 ## Story
 
@@ -84,6 +84,15 @@ so that o sistema possa registrar o estado dos eventos de forma persistente, est
 - [x] Task 6: Criar o arquivo `README.md` na raiz do projeto (AC: 9)
   - [x] Escrever o `README.md` com visão geral do AI Developer, arquitetura orientada a eventos e descrição do Event Store PostgreSQL
   - [x] Documentar comandos para inicializar a infraestrutura (`docker compose up`), rodar migrações manuais e executar a suíte de testes automatizados
+
+### Review Findings
+
+- [x] [Review][Patch] Parsing do `DATABASE_URL` não converte o prefixo legado `postgres://` [persistence/src/config.py:25]
+- [x] [Review][Patch] `async_database_url` retorna driver síncrono `postgresql+psycopg://` idêntico a `sync_database_url` [persistence/src/config.py:32]
+- [x] [Review][Patch] `entrypoint.sh` executa `alembic upgrade head` sem garantir o diretório `/app` [persistence/entrypoint.sh:53]
+- [x] [Review][Patch] Fixture `migrated_db` suprime todas as exceções durante a execução de `command.downgrade(alembic_cfg, "base")` [tests/persistence/test_migrations.py:52]
+- [x] [Review][Patch] `alembic.ini` não especifica `path_separator = os`, gerando `DeprecationWarning` nos testes [persistence/alembic.ini:1]
+- [x] [Review][Patch] Parse de `DATABASE_URL` no `entrypoint.sh` falha silenciosamente e tenta conectar em `localhost` dentro do Docker [persistence/entrypoint.sh:25]
 
 ## Dev Notes
 

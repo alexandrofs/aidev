@@ -49,10 +49,7 @@ def migrated_db(postgres_url):
     yield engine
     
     # Clean up (downgrade base)
-    try:
-        command.downgrade(alembic_cfg, "base")
-    except Exception:
-        pass
+    command.downgrade(alembic_cfg, "base")
     engine.dispose()
 
 

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -e
 
-echo "Starting ai-dev-migrations entrypoint..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+echo "Starting ai-dev-migrations entrypoint (working dir: $SCRIPT_DIR)..."
 
 python3 - << 'EOF'
 import sys
@@ -17,13 +20,18 @@ max_retries = int(os.getenv("MAX_RETRIES", "30"))
 
 if db_url:
     try:
-        parsed = urlparse(db_url)
+        # Handle postgres:// or postgresql+psycopg:// schemes for urlparse
+        normal_url = db_url
+        if "://" in normal_url and not normal_url.startswith("http"):
+            scheme, rest = normal_url.split("://", 1)
+            normal_url = f"http://{rest}"
+        parsed = urlparse(normal_url)
         if parsed.hostname:
             host = parsed.hostname
         if parsed.port:
             port = parsed.port
     except Exception as e:
-        print(f"Warning: Failed to parse DATABASE_URL: {e}")
+        print(f"Warning: Failed to parse DATABASE_URL ({e}). Using target {host}:{port}")
 
 print(f"Waiting for PostgreSQL at {host}:{port} (max retries: {max_retries})...")
 
