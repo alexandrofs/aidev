@@ -1,0 +1,70 @@
+# generated: 2026-08-09T22:08:58-03:00
+# last_updated: 2026-08-09T22:08:58-03:00
+# project: AI Developer
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; sprint-status surfaces open ones
+
+generated: 2026-08-09T22:08:58-03:00
+last_updated: 2026-08-09T22:08:58-03:00
+project: AI Developer
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+
+development_status:
+  epic-1: backlog
+  1-1-schema-do-event-store-e-migracoes-em-postgresql-ai-dev-migrations: backlog
+  1-2-endpoint-de-recepcao-validacao-e-ingestao-de-webhooks-ai-dev-api: backlog
+  1-3-roteamento-e-consumo-idempotente-via-trava-de-banco-skip-locked: backlog
+  epic-1-retrospective: optional
+  epic-2: backlog
+  2-1-worker-de-orquestracao-do-executor-e-sandbox-docker-efemero-ai-dev-executor: backlog
+  2-2-injecao-dinamica-de-contexto-mcps-skills-e-prompts: backlog
+  2-3-pipeline-de-validacao-local-testes-linters-e-memoria-hierarquica-diaria: backlog
+  epic-2-retrospective: optional
+  epic-3: backlog
+  3-1-integracao-com-api-graphql-rest-do-github-e-sincronizacao-do-github-projects-v2: backlog
+  3-2-workflow-de-desenvolvimento-autonomo-e-code-review-sem-pr-precoce: backlog
+  3-3-geracao-e-abertura-semantica-de-pull-requests-para-revisao-humana: backlog
+  epic-3-retrospective: optional
+  epic-4: backlog
+  4-1-monitoramento-de-webhooks-de-ci-e-ciclo-de-autocorrecao-ate-3-tentativas: backlog
+  4-2-transicao-de-estado-para-needs-human-action-e-bloqueio-seguro: backlog
+  4-3-worker-de-notificacoes-telegram-e-alertas-hitl-ai-dev-notifications: backlog
+  epic-4-retrospective: optional
