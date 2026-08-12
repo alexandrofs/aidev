@@ -54,9 +54,17 @@ async def receive_github_webhook(
         }
     except IntegrityError:
         await session.rollback()
+        res = await session.execute(
+            text("SELECT id, status FROM events WHERE event_id = :event_id"),
+            {"event_id": event_id}
+        )
+        existing_row = res.fetchone()
+        current_status = existing_row.status if existing_row else "PENDING"
+        existing_id = str(existing_row.id) if existing_row else None
         return {
             "message": "Event already processed (idempotent duplicate)",
+            "id": existing_id,
             "event_id": event_id,
             "event_type": event_type,
-            "status": "PENDING"
+            "status": current_status
         }

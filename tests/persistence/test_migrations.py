@@ -115,6 +115,9 @@ def test_events_indexes_exist(migrated_db):
     assert "idx_events_status_type" in index_names
     assert index_names["idx_events_status_type"]["column_names"] == ["status", "event_type"]
     
+    assert "idx_events_status_type_created" in index_names
+    assert index_names["idx_events_status_type_created"]["column_names"] == ["status", "event_type", "created_at"]
+    
     assert "idx_events_event_id" in index_names
     assert index_names["idx_events_event_id"]["column_names"] == ["event_id"]
 

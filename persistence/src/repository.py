@@ -1,11 +1,15 @@
 import json
 import hashlib
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text, bindparam
+from sqlalchemy import text, bindparam, JSON, String
+from sqlalchemy.dialects.postgresql import ARRAY
+
+logger = logging.getLogger(__name__)
 
 
 def compute_payload_hash(payload: Dict[str, Any]) -> str:
@@ -34,30 +38,34 @@ class EventRepository:
         event_id: Optional[str],
         action: str,
         actor: str,
-        details: Optional[Dict[str, Any]] = None
+        details: Optional[Dict[str, Any]] = None,
+        auto_commit: bool = True
     ) -> None:
         """Insere um registro de auditoria na tabela audit_logs."""
         log_id = str(uuid.uuid4())
-        details_str = json.dumps(details) if details is not None else None
 
         stmt = text("""
             INSERT INTO audit_logs (id, event_id, action, actor, details, created_at)
             VALUES (:id, :event_id, :action, :actor, :details, :created_at)
-        """)
+        """).bindparams(bindparam("details", type_=JSON))
+
         await self.session.execute(stmt, {
             "id": log_id,
             "event_id": event_id,
             "action": action,
             "actor": actor,
-            "details": details_str,
+            "details": details,
             "created_at": datetime.now(timezone.utc)
         })
+        if auto_commit:
+            await self.session.commit()
 
     async def claim_event(
         self,
         event_types: List[str],
         worker_id: str,
-        skip_locked: bool = True
+        skip_locked: bool = True,
+        auto_commit: bool = True
     ) -> Optional[EventRecord]:
         """
         Seleciona e trava atomicamente um evento em status PENDING filtrando por tipos.
@@ -86,7 +94,7 @@ class EventRepository:
                 FROM eligible
                 WHERE events.id = eligible.id
                 RETURNING events.id, events.event_id, events.event_type, events.status, events.payload, events.retry_count, events.created_at, events.updated_at;
-            """)
+            """).bindparams(bindparam("event_types", type_=ARRAY(String)))
             result = await self.session.execute(query, {"event_types": event_types})
             row = result.fetchone()
             if not row:
@@ -120,8 +128,8 @@ class EventRepository:
             try:
                 result = await self.session.execute(stmt, {"types": event_types})
                 row = result.fetchone()
-            except Exception:
-                # Se o dialeto SQLite não suportar RETURNING ou subquery em UPDATE
+            except Exception as exc:
+                logger.warning("SQL execution in claim_event fallback failed: %s", exc)
                 row = None
 
             if not row:
@@ -144,16 +152,19 @@ class EventRepository:
             event_id=event_rec.event_id,
             action="CLAIMED",
             actor=worker_id,
-            details={"event_type": event_rec.event_type}
+            details={"event_type": event_rec.event_type},
+            auto_commit=False
         )
-        await self.session.commit()
+        if auto_commit:
+            await self.session.commit()
         return event_rec
 
     async def complete_event(
         self,
         event_id: str,
         worker_id: str,
-        details: Optional[Dict[str, Any]] = None
+        details: Optional[Dict[str, Any]] = None,
+        auto_commit: bool = True
     ) -> bool:
         """Marca o evento como COMPLETED e grava log de auditoria."""
         stmt = text("""
@@ -167,9 +178,11 @@ class EventRepository:
                 event_id=event_id,
                 action="COMPLETED",
                 actor=worker_id,
-                details=details
+                details=details,
+                auto_commit=False
             )
-            await self.session.commit()
+            if auto_commit:
+                await self.session.commit()
             return True
         return False
 
@@ -178,54 +191,76 @@ class EventRepository:
         event_id: str,
         worker_id: str,
         error_message: str,
-        max_retries: int = 3
+        max_retries: int = 3,
+        auto_commit: bool = True
     ) -> bool:
         """
-        Trata falha de evento. Incrementa retry_count.
+        Trata falha de evento atomicamente. Incrementa retry_count.
         Se retry_count < max_retries, retorna a PENDING (action: RETRY).
         Caso contrário, define status FAILED (action: FAILED).
         """
-        stmt_select = text("SELECT retry_count FROM events WHERE event_id = :event_id")
-        res = await self.session.execute(stmt_select, {"event_id": event_id})
-        row = res.fetchone()
+        stmt_update = text("""
+            UPDATE events
+            SET retry_count = retry_count + 1,
+                status = CASE WHEN (retry_count + 1) < :max_retries THEN 'PENDING' ELSE 'FAILED' END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE event_id = :event_id
+            RETURNING retry_count, status;
+        """)
+        
+        try:
+            res = await self.session.execute(stmt_update, {
+                "event_id": event_id,
+                "max_retries": max_retries
+            })
+            row = res.fetchone()
+        except Exception:
+            # Fallback para SQLite sem suporte a RETURNING em UPDATE
+            stmt_fallback = text("""
+                UPDATE events
+                SET retry_count = retry_count + 1,
+                    status = CASE WHEN (retry_count + 1) < :max_retries THEN 'PENDING' ELSE 'FAILED' END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE event_id = :event_id
+            """)
+            res = await self.session.execute(stmt_fallback, {
+                "event_id": event_id,
+                "max_retries": max_retries
+            })
+            if res.rowcount == 0:
+                return False
+
+            res_check = await self.session.execute(
+                text("SELECT retry_count, status FROM events WHERE event_id = :event_id"),
+                {"event_id": event_id}
+            )
+            row = res_check.fetchone()
+
         if not row:
             return False
 
-        current_retries = row.retry_count
-        new_retries = current_retries + 1
-
-        if new_retries < max_retries:
-            new_status = "PENDING"
-            action = "RETRY"
-        else:
-            new_status = "FAILED"
-            action = "FAILED"
-
-        stmt_update = text("""
-            UPDATE events
-            SET status = :status, retry_count = :retry_count, updated_at = CURRENT_TIMESTAMP
-            WHERE event_id = :event_id
-        """)
-        await self.session.execute(stmt_update, {
-            "status": new_status,
-            "retry_count": new_retries,
-            "event_id": event_id
-        })
+        new_retries = row.retry_count
+        new_status = row.status
+        action = "RETRY" if new_status == "PENDING" else "FAILED"
 
         audit_details = {"error": error_message, "retry_count": new_retries}
         await self.add_audit_log(
             event_id=event_id,
             action=action,
             actor=worker_id,
-            details=audit_details
+            details=audit_details,
+            auto_commit=False
         )
-        await self.session.commit()
+        if auto_commit:
+            await self.session.commit()
         return True
 
     async def check_idempotency(
         self,
         event_id: Optional[str] = None,
-        payload_hash: Optional[str] = None
+        payload_hash: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        recent_limit: int = 100
     ) -> bool:
         """
         Verifica se um evento com o mesmo event_id ou payload_hash já foi processado ou está em processamento.
@@ -240,16 +275,22 @@ class EventRepository:
             if res.fetchone() is not None:
                 return True
 
-        if payload_hash:
+        target_hash = payload_hash
+        if not target_hash and payload:
+            target_hash = compute_payload_hash(payload)
+
+        if target_hash:
             stmt = text("""
                 SELECT payload FROM events
                 WHERE status IN ('PROCESSING', 'COMPLETED')
+                ORDER BY created_at DESC
+                LIMIT :recent_limit
             """)
-            res = await self.session.execute(stmt)
+            res = await self.session.execute(stmt, {"recent_limit": recent_limit})
             rows = res.fetchall()
             for row in rows:
                 p = row.payload if isinstance(row.payload, dict) else json.loads(row.payload)
-                if compute_payload_hash(p) == payload_hash:
+                if compute_payload_hash(p) == target_hash:
                     return True
 
         return False
