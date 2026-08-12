@@ -1,9 +1,15 @@
 # Deferred Work
 
-## Deferred from: code review of 1-2-endpoint-de-recepcao-validacao-e-ingestao-de-webhooks-ai-dev-api (2026-08-11)
+All previously deferred work items have been resolved.
 
-- **Engine SQLAlchemy criado em import-time em `database.py`** — O engine singleton é criado no carregamento do módulo, antes de qualquer override de configuração de teste. Pré-existente por design (mitigado pelo override de `get_async_session`), mas pode causar problemas se o engine for referenciado diretamente fora do sistema de DI do FastAPI. Considerar lazy initialization em iteração futura. [`api/src/database.py`]
+## Resolved Items
 
-- **Status hardcoded `"PENDING"` na resposta de duplicata idempotente** — O código retorna `"status": "PENDING"` hardcoded sem consultar o estado real do evento no banco. Pode retornar informação incorreta se o evento já foi processado por um worker. Comportamento dentro do escopo do AC-5, mas melhoria desejável: consultar o status atual antes de responder. [`api/src/routes/webhooks.py`]
+### Deferred from: code review of 1-2-endpoint-de-recepcao-validacao-e-ingestao-de-webhooks-ai-dev-api (2026-08-11)
 
-- **`db_session` sem rollback explícito entre testes** — Fixtures de teste não fazem rollback entre casos, potencial vazamento de estado em suítes expandidas. Atualmente mitigado pelo scope `function` que garante DB novo por teste, mas se o scope for alterado para `session` futuramente, pode causar flakiness. [`tests/api/conftest.py`]
+- [x] **Engine SQLAlchemy criado em import-time em `database.py`** — Refatorado para lazy initialization com funções `get_engine()` e `get_sessionmaker()` em [`api/src/database.py`].
+- [x] **Status hardcoded `"PENDING"` na resposta de duplicata idempotente** — Atualizado para consultar o `status` e `id` reais da linha persistida na tabela `events` ao capturar `IntegrityError` em [`api/src/routes/webhooks.py`].
+- [x] **`db_session` sem rollback explícito entre testes** — Adicionado bloco `try...finally` executando `await session.rollback()` e `await session.close()` na fixture [`tests/api/conftest.py`].
+
+### Deferred from: code review of 1-3-roteamento-e-consumo-idempotente-via-trava-de-banco-skip-locked (2026-08-11)
+
+- [x] **Falta de índice composto ordenado por `created_at` para a fila de consumo (`FOR UPDATE SKIP LOCKED`)** — Criada migração Alembic [`002_add_events_consumption_index.py`](file:///Users/alexandrofs/projects/aidev/persistence/src/migrations/versions/002_add_events_consumption_index.py) criando o índice `idx_events_status_type_created` em `(status, event_type, created_at)` e adicionado teste em [`tests/persistence/test_migrations.py`].

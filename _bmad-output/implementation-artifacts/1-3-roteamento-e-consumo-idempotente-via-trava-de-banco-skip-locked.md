@@ -4,7 +4,7 @@ baseline_commit: 0203a84e59e9ab258c52ee9b1de8623bfb2796f3
 
 # Story 1.3: Roteamento e Consumo Idempotente via Trava de Banco (`SKIP LOCKED`)
 
-Status: review
+Status: done
 
 ## Story
 
@@ -73,6 +73,17 @@ so that eventos concorrentes ou duplicados sejam processados exatamente uma vez 
 
 - [x] Task 5: Documentação no `README.md` (AC: 4)
   - [x] Atualizar o `README.md` da raiz descrevendo o mecanismo de consumo via `SKIP LOCKED` (AD-2), a classe `EventRepository` e as instruções para rodar os testes de concorrência
+
+### Review Findings
+
+- [x] [Review][Patch] Full Table Scan & In-Memory Payload Hashing em `check_idempotency` [persistence/src/repository.py:243]
+- [x] [Review][Patch] Formatação / Inserção de JSONB no Audit Log (`audit_logs.details`) [persistence/src/repository.py:41]
+- [x] [Review][Patch] Parametrização de Array em `ANY(:event_types)` no PostgreSQL [persistence/src/repository.py:78]
+- [x] [Review][Patch] Transação auto-commit em métodos de repositório [persistence/src/repository.py:149]
+- [x] [Review][Patch] Non-Atomic Race Condition em `fail_event` [persistence/src/repository.py:188]
+- [x] [Review][Patch] Fallback SQLite com tratamento genérico `except Exception:` em `claim_event` [persistence/src/repository.py:123]
+- [x] [Review][Defer] Falta de índice composto ordenado por `created_at` para a fila de consumo (`FOR UPDATE SKIP LOCKED`) [persistence/src/migrations/versions/001_initial_schema.py:34] — deferred, pre-existing
+
 
 ## Dev Notes
 
