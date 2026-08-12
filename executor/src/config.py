@@ -1,0 +1,43 @@
+import uuid
+from typing import Optional
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class ExecutorSettings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
+
+    DOCKER_SOCKET: str = "unix:///var/run/docker.sock"
+    SANDBOX_IMAGE: str = "python:3.12-slim"
+    POLL_INTERVAL: float = 2.0
+    MAX_POLL_INTERVAL: float = 30.0
+    BACKOFF_FACTOR: float = 1.5
+    WORKER_ID: str = Field(default_factory=lambda: f"executor-worker-{uuid.uuid4().hex[:8]}")
+    CONTAINER_TIMEOUT: int = 300
+
+    POSTGRES_HOST: str = "localhost"
+    POSTGRES_PORT: int = 5432
+    POSTGRES_DB: str = "aidev"
+    POSTGRES_USER: str = "aidev"
+    POSTGRES_PASSWORD: str = "aidev"
+    DATABASE_URL: Optional[str] = None
+
+    @property
+    def async_database_url(self) -> str:
+        if self.DATABASE_URL:
+            url = self.DATABASE_URL
+            if url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql+psycopg://", 1)
+            elif url.startswith("postgresql://"):
+                url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+            elif url.startswith("postgresql+psycopg2://"):
+                url = url.replace("postgresql+psycopg2://", "postgresql+psycopg://", 1)
+            return url
+        return f"postgresql+psycopg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+
+
+settings = ExecutorSettings()
