@@ -161,9 +161,45 @@ async with async_session_factory() as session:
 
 ---
 
+## Worker Executor e Sandbox Efêmero Docker (`ai-dev-executor`)
+
+O `ai-dev-executor` é o worker em Python 3.12 responsável por consumir eventos elegíveis (`workflow.execution`) do PostgreSQL via `EventRepository.claim_event` e instanciar um container Docker efêmero isolado para cada job de execução de código, testes ou automação (AD-6).
+
+### Orquestração e Teardown Completo do Sandbox (`DockerSandboxManager`)
+
+* **Isolamento de Host (AD-6)**: Cada execução roda dentro de um container Docker efêmero (ex: `python:3.12-slim`) com volumes efêmeros criados em diretórios temporários no host (`mkdtemp`).
+* **Garantia de Zero Leakage**: Ao finalizar o job (seja com sucesso, erro ou exceção), o orquestrador obrigatoriamente executa no bloco `finally:` o encerramento gracioso do container (`container.stop()`), a remoção forçada de volumes/containers (`container.remove(v=True, force=True)`) e a deleção dos arquivos temporários do host.
+* **Polling com Backoff & Shutdown Gracioso**: O worker opera em loop assíncrono continuo aplicando *exponential backoff* configurável em períodos de ociosidade, e intercepta sinais `SIGTERM`/`SIGINT` para finalizar a execução atual antes do encerramento.
+
+### Variáveis de Ambiente do Executor
+
+| Variável | Padrão | Descrição |
+| :--- | :--- | :--- |
+| `SANDBOX_IMAGE` | `python:3.12-slim` | Imagem base padrão dos containers de sandbox efêmero |
+| `POLL_INTERVAL` | `2.0` | Intervalo inicial de polling em segundos |
+| `MAX_POLL_INTERVAL` | `30.0` | Limite máximo do backoff durante ociosidade (segundos) |
+| `CONTAINER_TIMEOUT` | `300` | Timeout de execução do container sandbox (segundos) |
+| `DOCKER_SOCKET` | `unix:///var/run/docker.sock` | Caminho para comunicação com o Docker daemon |
+| `WORKER_ID` | `executor-worker-<hash>` | Identificador único do trabalhador para auditoria e trava de banco |
+| `POSTGRES_HOST` | `localhost` | Host do banco PostgreSQL |
+| `POSTGRES_PORT` | `5432` | Porta do banco PostgreSQL |
+| `POSTGRES_DB` | `aidev` | Nome do banco de dados |
+| `POSTGRES_USER` | `aidev` | Usuário do PostgreSQL |
+| `POSTGRES_PASSWORD` | `aidev` | Senha do PostgreSQL |
+
+---
+
 ## Suíte de Testes Automatizados
 
-Os testes automatizados verificam o esquema de banco de dados, o repositório de eventos (concorrência e idempotência) e os contratos da API `ai-dev-api`.
+Os testes automatizados verificam o esquema de banco de dados, o repositório de eventos (concorrência e idempotência), os contratos da API `ai-dev-api` e a orquestração do sandbox efêmero no `ai-dev-executor`.
+
+### Executando os Testes do Executor (`ai-dev-executor`):
+
+```bash
+source .venv/bin/activate
+pip install -e "./executor[dev]"
+pytest tests/executor/
+```
 
 ### Executando os Testes da API:
 
