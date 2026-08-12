@@ -83,3 +83,20 @@ def test_sandbox_execute_job():
     assert result["container_id"] == "test_container_789"
     mock_container.stop.assert_called_once()
     mock_container.remove.assert_called_once_with(v=True, force=True)
+
+
+def test_sandbox_execute_job_log_truncation_and_timeout():
+    mock_docker_client = MagicMock()
+    mock_container = MagicMock()
+    mock_container.id = "test_container_timeout"
+    mock_container.wait.side_effect = RuntimeError("ReadTimeout error")
+    mock_container.logs.return_value = b"A" * 200
+    mock_docker_client.containers.run.return_value = mock_container
+
+    manager = DockerSandboxManager(docker_client=mock_docker_client)
+    result = manager.execute_job(command="sleep 10", max_log_bytes=100)
+
+    assert result["exit_code"] == -1
+    assert len(result["logs"]) > 100
+    assert "logs truncados pelo executor" in result["logs"]
+

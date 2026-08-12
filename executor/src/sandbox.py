@@ -43,6 +43,11 @@ class DockerSandboxManager:
         Ao sair do bloco context, limpa obrigatoriamente o container e os arquivos temporários do host.
         """
         temp_dir = tempfile.mkdtemp(prefix="aidev_sandbox_")
+        try:
+            os.chmod(temp_dir, 0o700)
+        except Exception as e:
+            logger.warning(f"Não foi possível aplicar permissão restrita em {temp_dir}: {e}")
+
         target_image = image or self.settings.SANDBOX_IMAGE
         container = None
 
@@ -93,17 +98,33 @@ class DockerSandboxManager:
         command: str,
         image: Optional[str] = None,
         env_vars: Optional[Dict[str, str]] = None,
-        timeout: Optional[int] = None
+        timeout: Optional[int] = None,
+        max_log_bytes: int = 65536
     ) -> Dict[str, Any]:
         """
         Executa um comando síncrono dentro do sandbox efêmero, aguarda conclusão, captura logs e faz teardown.
         """
         timeout_val = timeout or self.settings.CONTAINER_TIMEOUT
         with self.run_sandbox(image=image, command=command, env_vars=env_vars) as container:
-            res = container.wait(timeout=timeout_val)
-            exit_code = res.get("StatusCode", -1) if isinstance(res, dict) else res
-            raw_logs = container.logs(stdout=True, stderr=True)
-            logs = raw_logs.decode("utf-8", errors="replace") if isinstance(raw_logs, bytes) else str(raw_logs)
+            exit_code = -1
+            try:
+                res = container.wait(timeout=timeout_val)
+                exit_code = res.get("StatusCode", -1) if isinstance(res, dict) else res
+            except Exception as e:
+                logger.error(f"Exceção ao aguardar término do container sandbox (timeout={timeout_val}s): {e}")
+
+            try:
+                raw_logs = container.logs(stdout=True, stderr=True)
+                if isinstance(raw_logs, bytes):
+                    logs = raw_logs.decode("utf-8", errors="replace")
+                else:
+                    logs = str(raw_logs or "")
+            except Exception as e:
+                logger.warning(f"Erro ao capturar logs do container: {e}")
+                logs = f"[Erro ao obter logs: {e}]"
+
+            if len(logs) > max_log_bytes:
+                logs = logs[:max_log_bytes] + "\n... [logs truncados pelo executor devido ao limite de tamanho]"
 
             return {
                 "exit_code": exit_code,

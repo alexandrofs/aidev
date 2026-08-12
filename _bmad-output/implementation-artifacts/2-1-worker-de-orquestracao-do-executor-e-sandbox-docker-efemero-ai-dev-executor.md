@@ -3,7 +3,7 @@ baseline_commit: 5b501cb51bb4c0002167d301ebcecfef72d733b8
 ---
 # Story 2.1: Worker de Orquestração do Executor e Sandbox Docker Efêmero (`ai-dev-executor`)
 
-Status: review
+Status: done
 
 ## Story
 
@@ -76,6 +76,14 @@ so that qualquer alteração de código, análise ou execução de testes ocorra
 
 - [x] Task 5: Documentação no `README.md` (AC: 4)
   - [x] Atualizar o `README.md` da raiz descrevendo o componente `ai-dev-executor`, a arquitetura do sandbox efêmero Docker (AD-6) e como rodar o worker e seus testes.
+
+### Review Findings
+
+- [x] [Review][Patch] Execução síncrona do Docker SDK bloqueia o Event Loop do AsyncIO [executor/src/worker.py:76-80]
+- [x] [Review][Patch] Ausência de tratamento de timeout e exceções da API do Docker em execute_job [executor/src/sandbox.py:102-107]
+- [x] [Review][Patch] Risco de OOM (Out of Memory) e estouro de payload por leitura ilimitada de logs [executor/src/sandbox.py:105-106]
+- [x] [Review][Patch] Permissão do diretório efêmero temporário criada com umask padrão do SO [executor/src/sandbox.py:45]
+- [x] [Review][Patch] Validação de tipo no payload do evento em _process_event [executor/src/worker.py:70-73]
 
 ---
 
