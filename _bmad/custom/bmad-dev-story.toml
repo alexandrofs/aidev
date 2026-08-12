@@ -1,0 +1,4 @@
+[workflow]
+activation_steps_append = [
+  "Criar e fazer checkout de uma nova branch a partir da branch main antes de iniciar a implementação da história."
+]
