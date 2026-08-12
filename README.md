@@ -133,9 +133,37 @@ curl -X POST http://localhost:8000/webhooks/github \
 
 ---
 
+## Módulo de Persistência e Consumo Idempotente (`persistence`)
+
+O módulo `persistence` expõe a abstração `EventRepository` para consumo de eventos sem a necessidade de brokers externos de mensageria (AD-2).
+
+### Trava Atômica (`FOR UPDATE SKIP LOCKED`) e Transições de Estado
+
+Workers como `ai-dev-executor` e `ai-dev-notifications` utilizam a classe `EventRepository` para reivindicar eventos em status `PENDING`:
+
+```python
+from persistence.src import EventRepository, compute_payload_hash
+
+async with async_session_factory() as session:
+    repo = EventRepository(session)
+    event = await repo.claim_event(event_types=["push", "issues"], worker_id="executor-worker-1")
+    if event:
+        # Processa o evento...
+        await repo.complete_event(event.event_id, worker_id="executor-worker-1", details={"result": "success"})
+    else:
+        # Se ocorrer falha:
+        await repo.fail_event(event.event_id, worker_id="executor-worker-1", error_message="Connection timeout", max_retries=3)
+```
+
+* **Atomicidade (`claim_event`)**: Em PostgreSQL 16, a seleção de eventos executa a cláusula `FOR UPDATE SKIP LOCKED` em uma CTE SQL atômica, alterando o status para `'PROCESSING'` e gravando ação `'CLAIMED'` em `audit_logs`. Em dialetos sem suporte a `SKIP LOCKED` (ex: SQLite em testes unitários), executa fallback gracioso.
+* **Garantia de Idempotência (`check_idempotency`)**: Permite verificar duplicatas antes da execução de efeitos colaterais através de `event_id` ou do hash canônico SHA-256 do payload (`compute_payload_hash`).
+* **Ciclo de Vida e Auditoria**: Suporta transições para `'COMPLETED'` ou `'FAILED'` (incrementando `retry_count` e re-fileirando para `'PENDING'` se `retry_count < max_retries`). Todas as ações alimentam a tabela `audit_logs`.
+
+---
+
 ## Suíte de Testes Automatizados
 
-Os testes automatizados verificam o esquema de banco de dados e os contratos da API `ai-dev-api`.
+Os testes automatizados verificam o esquema de banco de dados, o repositório de eventos (concorrência e idempotência) e os contratos da API `ai-dev-api`.
 
 ### Executando os Testes da API:
 
@@ -145,9 +173,17 @@ pip install -e "./api[dev]"
 pytest tests/api/
 ```
 
-### Executando Todos os Testes:
+### Executando os Testes de Persistência, Concorrência e Idempotência:
 
 ```bash
-pytest tests/api/ tests/persistence/test_offline_migrations.py
+source .venv/bin/activate
+pytest tests/persistence/test_event_consumption.py
 ```
+
+### Executando Todos os Testes do Projeto:
+
+```bash
+pytest
+```
+
 
