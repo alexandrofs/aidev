@@ -31,5 +31,23 @@ services:
       postgres:
         condition: service_healthy
 
+  ai-dev-api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: aidev-api
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-aidev}
+      POSTGRES_USER: ${POSTGRES_USER:-aidev}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aidev}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?GITHUB_WEBHOOK_SECRET must be set}
+    ports:
+      - "8000:8000"
+    depends_on:
+      ai-dev-migrations:
+        condition: service_completed_successfully
+
 volumes:
   postgres_data:

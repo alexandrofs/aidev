@@ -87,13 +87,67 @@ Caso deseje rodar o Alembic diretamente sem o Docker Compose:
 
 ---
 
+---
+
+## Serviço HTTP Gateway (`ai-dev-api`)
+
+O componente `ai-dev-api` expõe a interface HTTP em FastAPI para recebimento e ingestão segura de webhooks do GitHub.
+
+### Endpoints Disponíveis
+
+* **`GET /healthz`**: Verificação de saúde do container (retorna HTTP 200 `{"status": "ok"}`).
+* **`POST /webhooks/github`**: Recepção, autenticação HMAC-SHA256 e persistência de eventos de webhook (retorna HTTP 202 Accepted).
+
+### Variáveis de Ambiente
+
+| Variável | Padrão | Descrição |
+| :--- | :--- | :--- |
+| `GITHUB_WEBHOOK_SECRET` | **obrigatório** | Segredo compartilhado para validação HMAC SHA-256 do GitHub (`X-Hub-Signature-256`). **Nunca deixe vazio em produção.** |
+| `POSTGRES_HOST` | `localhost` | Host do banco PostgreSQL |
+| `POSTGRES_PORT` | `5432` | Porta do banco PostgreSQL |
+| `POSTGRES_DB` | `aidev` | Nome do banco de dados |
+| `POSTGRES_USER` | `aidev` | Usuário do PostgreSQL |
+| `POSTGRES_PASSWORD` | `aidev` | Senha do PostgreSQL |
+| `API_PORT` | `8000` | Porta onde o servidor uvicorn roda |
+
+### Exemplo de Envio de Webhook via `curl`
+
+Para simular o disparo de um webhook assinado via `curl`:
+
+```bash
+# 1. Defina o segredo (deve ser o mesmo configurado em GITHUB_WEBHOOK_SECRET) e o payload JSON
+SECRET="$GITHUB_WEBHOOK_SECRET"
+PAYLOAD='{"action":"labeled","label":{"name":"Ready for AI Dev"}}'
+
+# 2. Calcule a assinatura HMAC SHA-256
+SIG=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')
+
+# 3. Envie a requisição para a API
+curl -X POST http://localhost:8000/webhooks/github \
+  -H "Content-Type: application/json" \
+  -H "X-Hub-Signature-256: sha256=$SIG" \
+  -H "X-GitHub-Event: projects_v2_item" \
+  -H "X-GitHub-Delivery: 72cb0b04-4b32-4720-9a4f-a7e86e17d91e" \
+  -d "$PAYLOAD"
+```
+
+---
+
 ## Suíte de Testes Automatizados
 
-Os testes automatizados verificam programmaticamente o contrato das tabelas, valores padrão, integridade de restrições de unicidade e índices criados.
+Os testes automatizados verificam o esquema de banco de dados e os contratos da API `ai-dev-api`.
 
-Para executar os testes:
+### Executando os Testes da API:
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH=persistence/src pytest tests/persistence/test_migrations.py
+pip install -e "./api[dev]"
+pytest tests/api/
 ```
+
+### Executando Todos os Testes:
+
+```bash
+pytest tests/api/ tests/persistence/test_offline_migrations.py
+```
+
