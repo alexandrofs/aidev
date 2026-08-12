@@ -129,3 +129,27 @@ async def test_worker_graceful_shutdown(mock_repo, mock_sandbox, settings):
     worker.stop()
     await task
     assert not worker.running
+
+
+@pytest.mark.asyncio
+async def test_worker_invalid_payload(mock_repo, mock_sandbox, settings):
+    event = MagicMock()
+    event.event_id = "evt-300"
+    event.event_type = "workflow.execution"
+    event.payload = "raw-string-payload"
+    mock_repo.claim_event.side_effect = [event, None]
+
+    worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
+
+    task = asyncio.create_task(worker.start())
+    await asyncio.sleep(0.05)
+    worker.stop()
+    await task
+
+    mock_sandbox.execute_job.assert_called_once_with(
+        command="echo 'Nenhum comando especificado'",
+        image=settings.SANDBOX_IMAGE,
+        env_vars=None
+    )
+    mock_repo.complete_event.assert_called_once()
+

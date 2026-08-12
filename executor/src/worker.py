@@ -67,13 +67,14 @@ class ExecutorWorker:
 
     async def _process_event(self, event: EventRecord) -> None:
         """Processa um evento reivindicado executando o job no sandbox efêmero."""
-        payload = event.payload or {}
+        payload = event.payload if isinstance(event.payload, dict) else {}
         command = payload.get("command", "echo 'Nenhum comando especificado'")
         image = payload.get("image", self.settings.SANDBOX_IMAGE)
         env_vars = payload.get("env_vars", None)
 
         try:
-            result = self.sandbox_manager.execute_job(
+            result = await asyncio.to_thread(
+                self.sandbox_manager.execute_job,
                 command=command,
                 image=image,
                 env_vars=env_vars
@@ -91,6 +92,8 @@ class ExecutorWorker:
                 )
             else:
                 err_msg = f"Job encerrado com erro (exit code {exit_code}): {logs}"
+                if len(err_msg) > 2000:
+                    err_msg = err_msg[:2000] + "... [truncado]"
                 logger.warning(f"Evento {event.event_id} falhou: {err_msg}")
                 await self.repo.fail_event(
                     event.event_id,
@@ -99,6 +102,8 @@ class ExecutorWorker:
                 )
         except Exception as e:
             err_msg = f"Falha na execução do sandbox Docker: {str(e)}"
+            if len(err_msg) > 2000:
+                err_msg = err_msg[:2000] + "... [truncado]"
             logger.error(f"Erro ao processar evento {event.event_id}: {err_msg}", exc_info=True)
             await self.repo.fail_event(
                 event.event_id,
