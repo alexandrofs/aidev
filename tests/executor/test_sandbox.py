@@ -1,4 +1,5 @@
 import os
+import json
 import tempfile
 import pytest
 from unittest.mock import MagicMock, patch
@@ -44,6 +45,59 @@ def test_sandbox_manager_run_and_cleanup():
     mock_container.remove.assert_called_once_with(v=True, force=True)
     # Temporary directory must be cleaned up
     assert not os.path.exists(created_temp_dir)
+
+
+def test_sandbox_manager_context_bundle_injection():
+    mock_docker_client = MagicMock()
+    mock_container = MagicMock()
+    mock_container.id = "test_container_bundle"
+    mock_docker_client.containers.run.return_value = mock_container
+
+    manager = DockerSandboxManager(docker_client=mock_docker_client)
+
+    context_bundle = {
+        "phase": "coding",
+        "prompt_template": "# Coding prompt",
+        "mcp_config": {"mcpServers": {"test": {}}},
+        "skills": {
+            "demo-skill": {
+                "name": "demo-skill",
+                "content": "# Demo Skill MD"
+            }
+        },
+        "prompts": {
+            "planning": "# Planning",
+            "coding": "# Coding",
+            "review": "# Review"
+        }
+    }
+
+    with manager.run_sandbox(image="python:3.12-slim", command="echo test", context_bundle=context_bundle) as container:
+        call_kwargs = mock_docker_client.containers.run.call_args.kwargs
+        volumes = call_kwargs["volumes"]
+        created_temp_dir = list(volumes.keys())[0]
+
+        # Check injected env vars
+        env = call_kwargs["environment"]
+        assert env["WORKFLOW_PHASE"] == "coding"
+        assert env["MCP_CONFIG_PATH"] == "/workspace/mcp_config.json"
+
+        # Check injected files in host temp_dir
+        mcp_file = os.path.join(created_temp_dir, "mcp_config.json")
+        assert os.path.exists(mcp_file)
+        with open(mcp_file) as f:
+            data = json.load(f)
+            assert "mcpServers" in data
+
+        skill_file = os.path.join(created_temp_dir, ".agents", "skills", "demo-skill", "SKILL.md")
+        assert os.path.exists(skill_file)
+        with open(skill_file) as f:
+            assert f.read() == "# Demo Skill MD"
+
+        prompt_coding = os.path.join(created_temp_dir, "prompts", "coding.md")
+        assert os.path.exists(prompt_coding)
+        with open(prompt_coding) as f:
+            assert f.read() == "# Coding prompt"
 
 
 def test_sandbox_manager_cleanup_on_exception():
@@ -99,4 +153,3 @@ def test_sandbox_execute_job_log_truncation_and_timeout():
     assert result["exit_code"] == -1
     assert len(result["logs"]) > 100
     assert "logs truncados pelo executor" in result["logs"]
-

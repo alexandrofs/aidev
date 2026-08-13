@@ -19,6 +19,11 @@ class ExecutorSettings(BaseSettings):
     WORKER_ID: str = Field(default_factory=lambda: f"executor-worker-{uuid.uuid4().hex[:8]}")
     CONTAINER_TIMEOUT: int = 300
 
+    MCP_CONFIG_PATH: str = "mcp_config.json"
+    SKILLS_DIR: str = ".agents/skills"
+    PROMPTS_DIR: str = "executor/prompts"
+    MANDATORY_PROMPTS: list[str] = Field(default_factory=lambda: ["planning.md", "coding.md", "review.md"])
+
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str = "aidev"
