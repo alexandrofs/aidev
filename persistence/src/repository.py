@@ -294,3 +294,82 @@ class EventRepository:
                     return True
 
         return False
+
+    async def save_agent_memory(
+        self,
+        story_id: str,
+        memory_type: str,
+        content: Dict[str, Any],
+        auto_commit: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Salva um registro de memória na tabela agent_memory.
+        Suporta PostgreSQL (JSONB) e SQLite (JSON/Text) para testes.
+        """
+        mem_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+
+        stmt = text("""
+            INSERT INTO agent_memory (id, story_id, memory_type, content, created_at, updated_at)
+            VALUES (:id, :story_id, :memory_type, :content, :created_at, :updated_at)
+        """).bindparams(bindparam("content", type_=JSON))
+
+        await self.session.execute(stmt, {
+            "id": mem_id,
+            "story_id": story_id,
+            "memory_type": memory_type,
+            "content": content,
+            "created_at": now,
+            "updated_at": now,
+        })
+        if auto_commit:
+            await self.session.commit()
+
+        return {
+            "id": mem_id,
+            "story_id": story_id,
+            "memory_type": memory_type,
+            "content": content,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    async def get_agent_memory(
+        self,
+        story_id: str,
+        memory_type: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Busca registros de memória na tabela agent_memory por story_id e (opcionalmente) memory_type.
+        """
+        if memory_type:
+            stmt = text("""
+                SELECT id, story_id, memory_type, content, created_at, updated_at
+                FROM agent_memory
+                WHERE story_id = :story_id AND memory_type = :memory_type
+                ORDER BY created_at ASC
+            """)
+            res = await self.session.execute(stmt, {"story_id": story_id, "memory_type": memory_type})
+        else:
+            stmt = text("""
+                SELECT id, story_id, memory_type, content, created_at, updated_at
+                FROM agent_memory
+                WHERE story_id = :story_id
+                ORDER BY created_at ASC
+            """)
+            res = await self.session.execute(stmt, {"story_id": story_id})
+
+        rows = res.fetchall()
+        results = []
+        for row in rows:
+            content_dict = row.content if isinstance(row.content, dict) else json.loads(row.content)
+            results.append({
+                "id": str(row.id),
+                "story_id": row.story_id,
+                "memory_type": row.memory_type,
+                "content": content_dict,
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+            })
+        return results
+

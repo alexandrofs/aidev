@@ -11,10 +11,16 @@ from alembic import command
 
 def is_postgres_reachable(host="localhost", port=5432):
     try:
-        with socket.create_connection((host, port), timeout=1):
-            return True
-    except (socket.error, OSError):
+        from sqlalchemy import create_engine, text
+        url = f"postgresql+psycopg://aidev:aidev@{host}:{port}/aidev"
+        engine = create_engine(url, connect_args={"connect_timeout": 1})
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        engine.dispose()
+        return True
+    except Exception:
         return False
+
 
 
 @pytest.fixture(scope="module")
@@ -29,10 +35,11 @@ def postgres_url():
         try:
             from testcontainers.postgres import PostgresContainer
             with PostgresContainer("postgres:16-alpine") as postgres:
-                db_url = postgres.get_connection_url().replace("postgresql://", "postgresql+psycopg://")
+                db_url = postgres.get_connection_url().replace("postgresql+psycopg2://", "postgresql+psycopg://").replace("postgresql://", "postgresql+psycopg://")
                 yield db_url
         except Exception as e:
             pytest.skip(f"PostgreSQL container unavailable: {e}")
+
 
 
 @pytest.fixture(scope="module")

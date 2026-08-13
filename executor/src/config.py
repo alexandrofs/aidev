@@ -26,6 +26,8 @@ class ExecutorSettings(BaseSettings):
     SKILLS_DIR: str = ".agents/skills"
     PROMPTS_DIR: str = "executor/prompts"
     MANDATORY_PROMPTS: list[str] = Field(default_factory=lambda: ["coding.md", "review.md"])
+    VALIDATION_COMMANDS: list[str] = Field(default_factory=lambda: ["pytest"])
+    MEMLOG_FILENAME: str = ".memlog.md"
 
     def resolve_path(self, path_str: str) -> Path:
         p = Path(path_str)

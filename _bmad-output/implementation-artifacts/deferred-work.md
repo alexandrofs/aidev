@@ -18,3 +18,7 @@ All previously deferred work items have been resolved.
 
 - [x] **Resolução de caminhos relativos de configuração (`PROMPTS_DIR`, `SKILLS_DIR`, `MCP_CONFIG_PATH`) baseados no CWD** — Adicionada propriedade `PROJECT_ROOT` e helper de resolução `resolve_path()` em [`executor/src/config.py`](file:///Users/alexandrofs/projects/aidev/executor/src/config.py) e atualizado o [`executor/src/context_loader.py`](file:///Users/alexandrofs/projects/aidev/executor/src/context_loader.py) para utilizar propriedades resolvidas em relação à raiz do projeto.
 
+## Deferred from: code review of 2-3-pipeline-de-validacao-local-testes-linters-e-memoria-hierarquica-diaria (2026-08-12)
+
+- **F5 — Falta de idempotência em `save_agent_memory`** [`repository.py:312`] — INSERT sem `ON CONFLICT` causa registros duplicados de memória do agente em retries de evento. Requer decisão de design sobre chave de idempotência (única por `story_id` + data? por `story_id` + `event_id`?). Considerar UPSERT no PostgreSQL e deduplicar no append do `.memlog.md`.
+- **F6 — Race condition na escrita concorrente de `.memlog.md`** [`memory.py:87`] — Arquivo escrito sem lock; risco baixo na arquitetura atual (sandbox efêmero por evento, um workspace por execução). Reavaliar se múltiplas instâncias do executor compartilharem volumes de workspace.
