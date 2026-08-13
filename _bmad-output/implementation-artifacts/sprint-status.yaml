@@ -1,5 +1,5 @@
 # generated: 2026-08-09T22:08:58-03:00
-# last_updated: 2026-08-09T22:08:58-03:00
+# last_updated: 2026-08-13T00:06:00-03:00
 # project: AI Developer
 # project_key: NOKEY
 # tracking_system: file-system
@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-09T22:08:58-03:00
-last_updated: 2026-08-12T23:46:00-03:00
+last_updated: 2026-08-13T00:06:00-03:00
 project: AI Developer
 project_key: NOKEY
 tracking_system: file-system
@@ -57,7 +57,7 @@ development_status:
   2-1-worker-de-orquestracao-do-executor-e-sandbox-docker-efemero-ai-dev-executor: done
   2-2-injecao-dinamica-de-contexto-mcps-skills-e-prompts: done
   2-3-pipeline-de-validacao-local-testes-linters-e-memoria-hierarquica-diaria: done
-  epic-2-retrospective: optional
+  epic-2-retrospective: done
   epic-3: backlog
   3-1-integracao-com-api-graphql-rest-do-github-e-sincronizacao-do-github-projects-v2: backlog
   3-2-workflow-de-desenvolvimento-autonomo-e-code-review-sem-pr-precoce: backlog
@@ -73,17 +73,37 @@ action_items:
   - epic: 1
     action: "Politica Zero Deferred Work: resolver todos os achados de Code Review na propria historia"
     owner: "Team"
-    status: open
+    status: in-progress
   - epic: 1
     action: "Mapear permissoes minimas e isolamento de volumes efemeros para a Historia 2.1"
     owner: "Winston"
-    status: open
+    status: done
   - epic: 1
     action: "Configurar fixtures de teste unitario para o ai-dev-executor"
     owner: "Murat"
-    status: open
+    status: done
   - epic: 1
-    action: "Validar contrato de injeção de MCPs, Skills e Prompts para a Historia 2.2"
+    action: "Validar contrato de injecao de MCPs, Skills e Prompts para a Historia 2.2"
     owner: "John"
+    status: done
+  - epic: 2
+    action: "Criar customize.toml do bmad-code-review bloqueando categoria Defer (enforcement tecnico da Politica Zero Deferred Work)"
+    owner: "Amelia"
+    status: open
+  - epic: 2
+    action: "Resolver idempotencia de save_agent_memory com ON CONFLICT no PostgreSQL"
+    owner: "Murat"
+    status: open
+  - epic: 2
+    action: "Resolver race condition na escrita concorrente do .memlog.md com file lock"
+    owner: "Amelia"
+    status: open
+  - epic: 2
+    action: "Criar mocks da API GraphQL/REST do GitHub para testes isolados (historia 3.1)"
+    owner: "Murat"
+    status: open
+  - epic: 2
+    action: "Configurar repositorio de staging para testes de abertura de PR"
+    owner: "Winston"
     status: open
 
