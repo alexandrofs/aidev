@@ -300,28 +300,118 @@ class EventRepository:
         story_id: str,
         memory_type: str,
         content: Dict[str, Any],
+        event_id: Optional[str] = None,
         auto_commit: bool = True
     ) -> Dict[str, Any]:
         """
         Salva um registro de memória na tabela agent_memory.
-        Suporta PostgreSQL (JSONB) e SQLite (JSON/Text) para testes.
+        Suporta PostgreSQL (JSONB + UPSERT via ON CONFLICT) e SQLite (JSON/Text) para testes.
+
+        Idempotência (F5): quando `event_id` é fornecido, o UPSERT garante que retries
+        do mesmo evento não criem duplicatas — o content é atualizado no conflito.
         """
         mem_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
 
-        stmt = text("""
-            INSERT INTO agent_memory (id, story_id, memory_type, content, created_at, updated_at)
-            VALUES (:id, :story_id, :memory_type, :content, :created_at, :updated_at)
-        """).bindparams(bindparam("content", type_=JSON))
+        is_postgres = (
+            self.session.bind is not None
+            and "postgresql" in self.session.bind.dialect.name.lower()
+        )
 
-        await self.session.execute(stmt, {
-            "id": mem_id,
-            "story_id": story_id,
-            "memory_type": memory_type,
-            "content": content,
-            "created_at": now,
-            "updated_at": now,
-        })
+        if is_postgres and event_id:
+            # PostgreSQL: UPSERT — ON CONFLICT (story_id, memory_type, event_id)
+            stmt = text("""
+                INSERT INTO agent_memory (id, story_id, memory_type, content, event_id, created_at, updated_at)
+                VALUES (:id, :story_id, :memory_type, :content, :event_id, :created_at, :updated_at)
+                ON CONFLICT ON CONSTRAINT uq_agent_memory_story_type_event
+                DO UPDATE SET
+                    content = EXCLUDED.content,
+                    updated_at = EXCLUDED.updated_at
+                RETURNING id
+            """).bindparams(bindparam("content", type_=JSON))
+
+            result = await self.session.execute(stmt, {
+                "id": mem_id,
+                "story_id": story_id,
+                "memory_type": memory_type,
+                "content": content,
+                "event_id": event_id,
+                "created_at": now,
+                "updated_at": now,
+            })
+            row = result.fetchone()
+            if row:
+                mem_id = str(row.id)
+        else:
+            # SQLite fallback e PostgreSQL sem event_id: INSERT simples
+            # Para SQLite com event_id: verificar existência antes de inserir
+            if event_id:
+                check_stmt = text("""
+                    SELECT id FROM agent_memory
+                    WHERE story_id = :story_id AND memory_type = :memory_type AND event_id = :event_id
+                    LIMIT 1
+                """)
+                check_result = await self.session.execute(check_stmt, {
+                    "story_id": story_id,
+                    "memory_type": memory_type,
+                    "event_id": event_id
+                })
+                existing = check_result.fetchone()
+                if existing:
+                    # Atualiza o registro existente
+                    mem_id = str(existing.id)
+                    update_stmt = text("""
+                        UPDATE agent_memory
+                        SET content = :content, updated_at = :updated_at
+                        WHERE id = :id
+                    """).bindparams(bindparam("content", type_=JSON))
+                    await self.session.execute(update_stmt, {
+                        "id": mem_id,
+                        "content": content,
+                        "updated_at": now
+                    })
+                    if auto_commit:
+                        await self.session.commit()
+                    return {
+                        "id": mem_id,
+                        "story_id": story_id,
+                        "memory_type": memory_type,
+                        "content": content,
+                        "event_id": event_id,
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+
+            # INSERT simples (sem event_id, ou event_id novo)
+            try:
+                stmt = text("""
+                    INSERT INTO agent_memory (id, story_id, memory_type, content, event_id, created_at, updated_at)
+                    VALUES (:id, :story_id, :memory_type, :content, :event_id, :created_at, :updated_at)
+                """).bindparams(bindparam("content", type_=JSON))
+                await self.session.execute(stmt, {
+                    "id": mem_id,
+                    "story_id": story_id,
+                    "memory_type": memory_type,
+                    "content": content,
+                    "event_id": event_id,
+                    "created_at": now,
+                    "updated_at": now,
+                })
+            except Exception:
+                # Fallback para schema sem coluna event_id (SQLite em testes legados)
+                stmt_legacy = text("""
+                    INSERT INTO agent_memory (id, story_id, memory_type, content, created_at, updated_at)
+                    VALUES (:id, :story_id, :memory_type, :content, :created_at, :updated_at)
+                """).bindparams(bindparam("content", type_=JSON))
+                await self.session.execute(stmt_legacy, {
+                    "id": mem_id,
+                    "story_id": story_id,
+                    "memory_type": memory_type,
+                    "content": content,
+                    "created_at": now,
+                    "updated_at": now,
+                })
+
         if auto_commit:
             await self.session.commit()
 
@@ -330,6 +420,7 @@ class EventRepository:
             "story_id": story_id,
             "memory_type": memory_type,
             "content": content,
+            "event_id": event_id,
             "created_at": now,
             "updated_at": now,
         }

@@ -215,7 +215,12 @@ class ExecutorWorker:
                     logger.warning(f"Erro ao registrar audit_log VALIDATION_PASSED: {log_err}")
 
             # Persistência Nível 2 (PostgreSQL agent_memory)
-            await self.memory_manager.record_daily_summary(story_id=story_id, summary_data=summary_data)
+            # F5: event_id passado para ativar UPSERT idempontente no repositório
+            await self.memory_manager.record_daily_summary(
+                story_id=story_id,
+                summary_data=summary_data,
+                event_id=event.event_id
+            )
 
             # Persistência Nível 3 (.memlog.md no repositório)
             # F1: executado em thread para não bloquear o event loop com I/O síncrono
@@ -261,7 +266,12 @@ class ExecutorWorker:
                     logger.warning(f"Erro ao registrar audit_log VALIDATION_FAILED: {log_err}")
 
             # Persistência Nível 2 do registro de erro
-            await self.memory_manager.record_daily_summary(story_id=story_id, summary_data=summary_data)
+            # F5: event_id passado para ativar UPSERT idempontente no repositório
+            await self.memory_manager.record_daily_summary(
+                story_id=story_id,
+                summary_data=summary_data,
+                event_id=event.event_id
+            )
 
             # F4: Nível 3 (.memlog.md) também atualizado em caso de falha, mantendo consistência com o DB
             workspace_rel = payload.get("workspace_path", ".")

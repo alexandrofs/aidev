@@ -17,6 +17,7 @@ async def async_engine():
                 story_id TEXT NOT NULL,
                 memory_type TEXT NOT NULL,
                 content TEXT NOT NULL,
+                event_id TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -63,3 +64,62 @@ async def test_save_and_get_agent_memory(session: AsyncSession):
     # Get agent memory without memory_type filter
     all_memories = await repo.get_agent_memory(story_id=story_id)
     assert len(all_memories) == 1
+
+
+@pytest.mark.asyncio
+async def test_save_agent_memory_idempotent_on_retry(session: AsyncSession):
+    """F5: chamar save_agent_memory duas vezes com o mesmo event_id não deve criar duplicata (check-then-update no SQLite)."""
+    repo = EventRepository(session)
+    story_id = "retry-story"
+    event_id = "evt-retry-001"
+    content_v1 = {"status": "COMPLETED", "attempt": 1}
+    content_v2 = {"status": "COMPLETED", "attempt": 2}
+
+    # Primeira gravação
+    saved1 = await repo.save_agent_memory(
+        story_id=story_id,
+        memory_type="daily_summary",
+        content=content_v1,
+        event_id=event_id
+    )
+    assert saved1["id"] is not None
+    mem_id_first = saved1["id"]
+
+    # Segunda gravação com mesmo event_id (simula retry)
+    saved2 = await repo.save_agent_memory(
+        story_id=story_id,
+        memory_type="daily_summary",
+        content=content_v2,
+        event_id=event_id
+    )
+
+    # Deve ser o mesmo registro (mesmo ID)
+    assert saved2["id"] == mem_id_first, "Retry deve retornar o mesmo registro, não criar duplicata"
+
+    # Banco deve ter exatamente 1 registro, com o content atualizado
+    memories = await repo.get_agent_memory(story_id=story_id, memory_type="daily_summary")
+    assert len(memories) == 1, f"Esperado 1 registro, encontrado {len(memories)} — duplicata detectada"
+    assert memories[0]["content"]["attempt"] == 2, "Content deve ter sido atualizado no retry"
+
+
+@pytest.mark.asyncio
+async def test_save_agent_memory_different_event_ids_create_separate_records(session: AsyncSession):
+    """F5: event_ids diferentes para a mesma story devem criar registros separados (eventos distintos)."""
+    repo = EventRepository(session)
+    story_id = "multi-event-story"
+
+    await repo.save_agent_memory(
+        story_id=story_id,
+        memory_type="daily_summary",
+        content={"status": "COMPLETED", "attempt": 1},
+        event_id="evt-001"
+    )
+    await repo.save_agent_memory(
+        story_id=story_id,
+        memory_type="daily_summary",
+        content={"status": "COMPLETED", "attempt": 2},
+        event_id="evt-002"
+    )
+
+    memories = await repo.get_agent_memory(story_id=story_id)
+    assert len(memories) == 2, "Eventos diferentes devem criar registros independentes"
