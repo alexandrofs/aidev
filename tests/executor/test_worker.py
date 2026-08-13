@@ -1,11 +1,13 @@
 import os
 import asyncio
+import tempfile
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from executor.src.config import ExecutorSettings
 from executor.src.worker import ExecutorWorker
 from executor.src.sandbox import DockerSandboxManager
+from executor.src.exceptions import PromptTemplateNotFoundError
 from persistence.src.repository import EventRecord
 
 
@@ -47,25 +49,25 @@ async def test_worker_claim_and_complete(mock_repo, mock_sandbox, settings):
         event_id="evt-100",
         event_type="workflow.execution",
         status="PROCESSING",
-        payload={"command": "python -c 'print(42)'", "image": "python:3.12-slim"}
+        payload={"command": "python -c 'print(42)'", "image": "python:3.12-slim", "phase": "coding"}
     )
     
     mock_repo.claim_event.side_effect = [event, None]
 
     worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
 
-    # Run worker loop for a short time
     task = asyncio.create_task(worker.start())
     await asyncio.sleep(0.05)
     worker.stop()
     await task
 
     mock_repo.claim_event.assert_called()
-    mock_sandbox.execute_job.assert_called_once_with(
-        command="python -c 'print(42)'",
-        image="python:3.12-slim",
-        env_vars=None
-    )
+    assert mock_sandbox.execute_job.called
+    call_kwargs = mock_sandbox.execute_job.call_args.kwargs
+    assert call_kwargs["command"] == "python -c 'print(42)'"
+    assert call_kwargs["image"] == "python:3.12-slim"
+    assert call_kwargs["context_bundle"]["phase"] == "coding"
+
     mock_repo.complete_event.assert_called_once()
     call_args = mock_repo.complete_event.call_args
     assert call_args.args[0] == "evt-100"
@@ -74,10 +76,38 @@ async def test_worker_claim_and_complete(mock_repo, mock_sandbox, settings):
 
 
 @pytest.mark.asyncio
-async def test_worker_claim_and_fail(mock_repo, mock_sandbox, settings):
+async def test_worker_missing_prompt_template_fails_gracefully(mock_repo, mock_sandbox, settings):
     event = EventRecord(
         id="2",
         event_id="evt-200",
+        event_type="workflow.execution",
+        status="PROCESSING",
+        payload={"command": "python script.py", "phase": "nonexistent_phase"}
+    )
+    mock_repo.claim_event.side_effect = [event, None]
+
+    with patch("executor.src.context_loader.ContextLoader.build_context_bundle") as mock_build:
+        mock_build.side_effect = PromptTemplateNotFoundError("Prompt obrigatório ausente: template para a fase 'nonexistent_phase'")
+
+        worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
+
+        task = asyncio.create_task(worker.start())
+        await asyncio.sleep(0.05)
+        worker.stop()
+        await task
+
+        mock_sandbox.execute_job.assert_not_called()
+        mock_repo.fail_event.assert_called_once()
+        fail_args = mock_repo.fail_event.call_args
+        assert fail_args.args[0] == "evt-200"
+        assert "Prompt obrigatório ausente" in fail_args.kwargs["error_message"]
+
+
+@pytest.mark.asyncio
+async def test_worker_claim_and_fail(mock_repo, mock_sandbox, settings):
+    event = EventRecord(
+        id="3",
+        event_id="evt-300",
         event_type="workflow.execution",
         status="PROCESSING",
         payload={"command": "invalid command"}
@@ -94,7 +124,7 @@ async def test_worker_claim_and_fail(mock_repo, mock_sandbox, settings):
 
     mock_repo.fail_event.assert_called_once()
     call_args = mock_repo.fail_event.call_args
-    assert call_args.args[0] == "evt-200"
+    assert call_args.args[0] == "evt-300"
     assert call_args.args[1] == "test-worker-1"
     assert "Sandbox container creation failed" in call_args.kwargs["error_message"]
 
@@ -111,7 +141,6 @@ async def test_worker_backoff_logic(mock_repo, mock_sandbox, settings):
     worker.stop()
     await task
 
-    # Poll interval should have increased due to backoff
     assert worker.current_poll_interval > settings.POLL_INTERVAL
     assert worker.current_poll_interval <= settings.MAX_POLL_INTERVAL
 
@@ -134,7 +163,7 @@ async def test_worker_graceful_shutdown(mock_repo, mock_sandbox, settings):
 @pytest.mark.asyncio
 async def test_worker_invalid_payload(mock_repo, mock_sandbox, settings):
     event = MagicMock()
-    event.event_id = "evt-300"
+    event.event_id = "evt-400"
     event.event_type = "workflow.execution"
     event.payload = "raw-string-payload"
     mock_repo.claim_event.side_effect = [event, None]
@@ -146,10 +175,9 @@ async def test_worker_invalid_payload(mock_repo, mock_sandbox, settings):
     worker.stop()
     await task
 
-    mock_sandbox.execute_job.assert_called_once_with(
-        command="echo 'Nenhum comando especificado'",
-        image=settings.SANDBOX_IMAGE,
-        env_vars=None
-    )
+    assert mock_sandbox.execute_job.called
+    call_kwargs = mock_sandbox.execute_job.call_args.kwargs
+    assert call_kwargs["command"] == "echo 'Nenhum comando especificado'"
+    assert call_kwargs["context_bundle"] is not None
+    assert call_kwargs["context_bundle"]["phase"] == "coding"
     mock_repo.complete_event.assert_called_once()
-

@@ -1,8 +1,10 @@
 import asyncio
 import logging
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from executor.src.config import ExecutorSettings, settings as global_settings
 from executor.src.sandbox import DockerSandboxManager
+from executor.src.context_loader import ContextLoader
+from executor.src.exceptions import ContextError
 from persistence.src.repository import EventRepository, EventRecord
 
 logger = logging.getLogger(__name__)
@@ -12,18 +14,21 @@ class ExecutorWorker:
     """
     Worker assíncrono de consumo e despache de jobs para containers efêmeros Docker.
     Consome eventos de status PENDING via claim_event (SKIP LOCKED) e orquestra o ciclo de vida.
+    Injeta dinamicamente o envelope de contexto (MCPs, Skills e Prompts) no sandbox.
     """
 
     def __init__(
         self,
         repo: EventRepository,
         sandbox_manager: Optional[DockerSandboxManager] = None,
+        context_loader: Optional[ContextLoader] = None,
         settings: Optional[ExecutorSettings] = None,
         event_types: Optional[List[str]] = None
     ):
         self.repo = repo
         self.settings = settings or global_settings
         self.sandbox_manager = sandbox_manager or DockerSandboxManager(settings=self.settings)
+        self.context_loader = context_loader or ContextLoader(settings_override=self.settings)
         self.event_types = event_types or ["workflow.execution"]
         self.running = False
         self.current_poll_interval = self.settings.POLL_INTERVAL
@@ -66,18 +71,45 @@ class ExecutorWorker:
                 await asyncio.sleep(self.current_poll_interval)
 
     async def _process_event(self, event: EventRecord) -> None:
-        """Processa um evento reivindicado executando o job no sandbox efêmero."""
+        """Processa um evento reivindicado compilando o pacote de contexto e executando o job no sandbox."""
         payload = event.payload if isinstance(event.payload, dict) else {}
         command = payload.get("command", "echo 'Nenhum comando especificado'")
         image = payload.get("image", self.settings.SANDBOX_IMAGE)
         env_vars = payload.get("env_vars", None)
+        phase = payload.get("phase", "coding")
 
+        # 1. Compilação e Injeção do Context Bundle
+        context_bundle = None
+        try:
+            context_bundle = self.context_loader.build_context_bundle(phase=phase)
+            logger.info(f"Pacote de contexto compilado com sucesso para a fase '{phase}'.")
+        except ContextError as err:
+            err_msg = f"Falha de injeção de contexto (fase '{phase}'): {err}"
+            logger.error(err_msg)
+            if hasattr(self.repo, "add_audit_log"):
+                try:
+                    await self.repo.add_audit_log(
+                        event_id=event.event_id,
+                        action="CONTEXT_LOAD_FAILED",
+                        details={"error": str(err), "phase": phase}
+                    )
+                except Exception as log_err:
+                    logger.warning(f"Não foi possível registrar audit_log para falha de contexto: {log_err}")
+            await self.repo.fail_event(
+                event.event_id,
+                self.settings.WORKER_ID,
+                error_message=err_msg
+            )
+            return
+
+        # 2. Execução no Sandbox Docker
         try:
             result = await asyncio.to_thread(
                 self.sandbox_manager.execute_job,
                 command=command,
                 image=image,
-                env_vars=env_vars
+                env_vars=env_vars,
+                context_bundle=context_bundle
             )
             exit_code = result.get("exit_code", -1)
             logs = result.get("logs", "")

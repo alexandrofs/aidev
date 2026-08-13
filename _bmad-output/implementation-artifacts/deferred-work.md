@@ -13,3 +13,8 @@ All previously deferred work items have been resolved.
 ### Deferred from: code review of 1-3-roteamento-e-consumo-idempotente-via-trava-de-banco-skip-locked (2026-08-11)
 
 - [x] **Falta de índice composto ordenado por `created_at` para a fila de consumo (`FOR UPDATE SKIP LOCKED`)** — Criada migração Alembic [`002_add_events_consumption_index.py`](file:///Users/alexandrofs/projects/aidev/persistence/src/migrations/versions/002_add_events_consumption_index.py) criando o índice `idx_events_status_type_created` em `(status, event_type, created_at)` e adicionado teste em [`tests/persistence/test_migrations.py`].
+
+### Deferred from: code review of 2-2-injecao-dinamica-de-contexto-mcps-skills-e-prompts (2026-08-12)
+
+- [ ] **Resolução de caminhos relativos de configuração (`PROMPTS_DIR`, `SKILLS_DIR`, `MCP_CONFIG_PATH`) baseados no CWD** — [`executor/src/config.py`](file:///Users/alexandrofs/projects/aidev/executor/src/config.py)
+
