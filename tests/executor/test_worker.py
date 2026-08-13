@@ -181,3 +181,38 @@ async def test_worker_invalid_payload(mock_repo, mock_sandbox, settings):
     assert call_kwargs["context_bundle"] is not None
     assert call_kwargs["context_bundle"]["phase"] == "coding"
     mock_repo.complete_event.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_worker_multi_phase_sequential_execution(mock_repo, mock_sandbox, settings):
+    event = EventRecord(
+        id="5",
+        event_id="evt-500",
+        event_type="workflow.execution",
+        status="PROCESSING",
+        payload={
+            "command": "python run.py",
+            "image": "python:3.12-slim",
+            "phases": ["coding", "review"]
+        }
+    )
+    mock_repo.claim_event.side_effect = [event, None]
+    mock_sandbox.execute_job.return_value = {"exit_code": 0, "logs": "Phase OK", "container_id": "c-123"}
+
+    worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
+
+    task = asyncio.create_task(worker.start())
+    await asyncio.sleep(0.05)
+    worker.stop()
+    await task
+
+    assert mock_sandbox.execute_job.call_count == 2
+    calls = mock_sandbox.execute_job.call_args_list
+    assert calls[0].kwargs["context_bundle"]["phase"] == "coding"
+    assert calls[1].kwargs["context_bundle"]["phase"] == "review"
+
+    mock_repo.complete_event.assert_called_once()
+    complete_details = mock_repo.complete_event.call_args.kwargs["details"]
+    assert len(complete_details["phases"]) == 2
+    assert complete_details["phases"][0]["phase"] == "coding"
+    assert complete_details["phases"][1]["phase"] == "review"

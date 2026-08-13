@@ -71,77 +71,101 @@ class ExecutorWorker:
                 await asyncio.sleep(self.current_poll_interval)
 
     async def _process_event(self, event: EventRecord) -> None:
-        """Processa um evento reivindicado compilando o pacote de contexto e executando o job no sandbox."""
+        """Processa um evento reivindicado compilando o pacote de contexto e executando o job no sandbox para cada fase da sequência."""
         payload = event.payload if isinstance(event.payload, dict) else {}
         command = payload.get("command", "echo 'Nenhum comando especificado'")
         image = payload.get("image", self.settings.SANDBOX_IMAGE)
         env_vars = payload.get("env_vars", None)
-        phase = payload.get("phase", "coding")
 
-        # 1. Compilação e Injeção do Context Bundle
-        context_bundle = None
-        try:
-            context_bundle = self.context_loader.build_context_bundle(phase=phase)
-            logger.info(f"Pacote de contexto compilado com sucesso para a fase '{phase}'.")
-        except ContextError as err:
-            err_msg = f"Falha de injeção de contexto (fase '{phase}'): {err}"
-            logger.error(err_msg)
-            if hasattr(self.repo, "add_audit_log"):
-                try:
-                    await self.repo.add_audit_log(
-                        event_id=event.event_id,
-                        action="CONTEXT_LOAD_FAILED",
-                        details={"error": str(err), "phase": phase}
-                    )
-                except Exception as log_err:
-                    logger.warning(f"Não foi possível registrar audit_log para falha de contexto: {log_err}")
-            await self.repo.fail_event(
-                event.event_id,
-                self.settings.WORKER_ID,
-                error_message=err_msg
-            )
-            return
+        raw_phases = payload.get("phases")
+        if raw_phases and isinstance(raw_phases, list):
+            phases = raw_phases
+        else:
+            phases = [payload.get("phase", "coding")]
 
-        # 2. Execução no Sandbox Docker
-        try:
-            result = await asyncio.to_thread(
-                self.sandbox_manager.execute_job,
-                command=command,
-                image=image,
-                env_vars=env_vars,
-                context_bundle=context_bundle
-            )
-            exit_code = result.get("exit_code", -1)
-            logs = result.get("logs", "")
-            container_id = result.get("container_id", "")
+        phase_results = []
 
-            if exit_code == 0:
-                logger.info(f"Job do evento {event.event_id} concluído com sucesso.")
-                await self.repo.complete_event(
-                    event.event_id,
-                    self.settings.WORKER_ID,
-                    details={"exit_code": exit_code, "logs": logs, "container_id": container_id}
-                )
-            else:
-                err_msg = f"Job encerrado com erro (exit code {exit_code}): {logs}"
-                if len(err_msg) > 2000:
-                    err_msg = err_msg[:2000] + "... [truncado]"
-                logger.warning(f"Evento {event.event_id} falhou: {err_msg}")
+        for phase in phases:
+            # 1. Compilação e Injeção do Context Bundle para a fase atual
+            context_bundle = None
+            try:
+                context_bundle = self.context_loader.build_context_bundle(phase=phase)
+                logger.info(f"Pacote de contexto compilado com sucesso para a fase '{phase}' no evento {event.event_id}.")
+            except ContextError as err:
+                err_msg = f"Falha de injeção de contexto (fase '{phase}'): {err}"
+                logger.error(err_msg)
+                if hasattr(self.repo, "add_audit_log"):
+                    try:
+                        await self.repo.add_audit_log(
+                            event_id=event.event_id,
+                            action="CONTEXT_LOAD_FAILED",
+                            details={"error": str(err), "phase": phase}
+                        )
+                    except Exception as log_err:
+                        logger.warning(f"Não foi possível registrar audit_log para falha de contexto: {log_err}")
                 await self.repo.fail_event(
                     event.event_id,
                     self.settings.WORKER_ID,
                     error_message=err_msg
                 )
-        except Exception as e:
-            err_msg = f"Falha na execução do sandbox Docker: {str(e)}"
-            if len(err_msg) > 2000:
-                err_msg = err_msg[:2000] + "... [truncado]"
-            logger.error(f"Erro ao processar evento {event.event_id}: {err_msg}", exc_info=True)
-            await self.repo.fail_event(
-                event.event_id,
-                self.settings.WORKER_ID,
-                error_message=err_msg
-            )
+                return
+
+            # 2. Execução no Sandbox Docker
+            try:
+                result = await asyncio.to_thread(
+                    self.sandbox_manager.execute_job,
+                    command=command,
+                    image=image,
+                    env_vars=env_vars,
+                    context_bundle=context_bundle
+                )
+                exit_code = result.get("exit_code", -1)
+                logs = result.get("logs", "")
+                container_id = result.get("container_id", "")
+
+                phase_results.append({
+                    "phase": phase,
+                    "exit_code": exit_code,
+                    "logs": logs,
+                    "container_id": container_id
+                })
+
+                if exit_code != 0:
+                    err_msg = f"Job da fase '{phase}' encerrado com erro (exit code {exit_code}): {logs}"
+                    if len(err_msg) > 2000:
+                        err_msg = err_msg[:2000] + "... [truncado]"
+                    logger.warning(f"Evento {event.event_id} falhou na fase '{phase}': {err_msg}")
+                    await self.repo.fail_event(
+                        event.event_id,
+                        self.settings.WORKER_ID,
+                        error_message=err_msg
+                    )
+                    return
+            except Exception as e:
+                err_msg = f"Falha na execução do sandbox Docker na fase '{phase}': {str(e)}"
+                if len(err_msg) > 2000:
+                    err_msg = err_msg[:2000] + "... [truncado]"
+                logger.error(f"Erro ao processar evento {event.event_id} na fase '{phase}': {err_msg}", exc_info=True)
+                await self.repo.fail_event(
+                    event.event_id,
+                    self.settings.WORKER_ID,
+                    error_message=err_msg
+                )
+                return
+
+        # 3. Conclusão de todas as fases com sucesso
+        logger.info(f"Todas as fases ({phases}) do evento {event.event_id} concluídas com sucesso.")
+        last_result = phase_results[-1] if phase_results else {}
+        await self.repo.complete_event(
+            event.event_id,
+            self.settings.WORKER_ID,
+            details={
+                "phases": phase_results,
+                "exit_code": last_result.get("exit_code", 0),
+                "logs": last_result.get("logs", ""),
+                "container_id": last_result.get("container_id", "")
+            }
+        )
 
     def stop(self) -> None:
         """Solicita o encerramento gracioso do worker."""
