@@ -16,5 +16,5 @@ All previously deferred work items have been resolved.
 
 ### Deferred from: code review of 2-2-injecao-dinamica-de-contexto-mcps-skills-e-prompts (2026-08-12)
 
-- [ ] **Resolução de caminhos relativos de configuração (`PROMPTS_DIR`, `SKILLS_DIR`, `MCP_CONFIG_PATH`) baseados no CWD** — [`executor/src/config.py`](file:///Users/alexandrofs/projects/aidev/executor/src/config.py)
+- [x] **Resolução de caminhos relativos de configuração (`PROMPTS_DIR`, `SKILLS_DIR`, `MCP_CONFIG_PATH`) baseados no CWD** — Adicionada propriedade `PROJECT_ROOT` e helper de resolução `resolve_path()` em [`executor/src/config.py`](file:///Users/alexandrofs/projects/aidev/executor/src/config.py) e atualizado o [`executor/src/context_loader.py`](file:///Users/alexandrofs/projects/aidev/executor/src/context_loader.py) para utilizar propriedades resolvidas em relação à raiz do projeto.
 

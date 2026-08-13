@@ -16,7 +16,7 @@ class ContextLoader:
 
     def load_mcp_config(self, mcp_config_path: Optional[str] = None) -> Dict[str, Any]:
         """Loads and validates MCP server configuration file."""
-        target_path = Path(mcp_config_path or self.settings.MCP_CONFIG_PATH)
+        target_path = Path(mcp_config_path) if mcp_config_path else getattr(self.settings, "resolved_mcp_config_path", Path(self.settings.MCP_CONFIG_PATH))
         if not target_path.exists():
             logger.info(f"MCP configuration file not found at {target_path}. Using empty MCP configuration.")
             return {}
@@ -38,7 +38,7 @@ class ContextLoader:
 
     def discover_skills(self, skills_dir: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
         """Scans skills directory for subdirectories containing SKILL.md."""
-        target_dir = Path(skills_dir or self.settings.SKILLS_DIR)
+        target_dir = Path(skills_dir) if skills_dir else getattr(self.settings, "resolved_skills_dir", Path(self.settings.SKILLS_DIR))
         skills_catalog: Dict[str, Dict[str, Any]] = {}
 
         if not target_dir.exists() or not target_dir.is_dir():
@@ -63,7 +63,7 @@ class ContextLoader:
 
     def load_prompt_template(self, phase: str, prompts_dir: Optional[str] = None) -> str:
         """Loads and validates a prompt template for a specific workflow phase."""
-        target_dir = Path(prompts_dir or self.settings.PROMPTS_DIR)
+        target_dir = Path(prompts_dir) if prompts_dir else getattr(self.settings, "resolved_prompts_dir", Path(self.settings.PROMPTS_DIR))
         clean_phase = os.path.basename(phase)
         filename = clean_phase if clean_phase.endswith(".md") else f"{clean_phase}.md"
         prompt_path = target_dir / filename

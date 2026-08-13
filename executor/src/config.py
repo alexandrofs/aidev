@@ -1,4 +1,5 @@
 import uuid
+from pathlib import Path
 from typing import Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,10 +20,31 @@ class ExecutorSettings(BaseSettings):
     WORKER_ID: str = Field(default_factory=lambda: f"executor-worker-{uuid.uuid4().hex[:8]}")
     CONTAINER_TIMEOUT: int = 300
 
+    PROJECT_ROOT: str = Field(default_factory=lambda: str(Path(__file__).resolve().parent.parent.parent))
+
     MCP_CONFIG_PATH: str = "mcp_config.json"
     SKILLS_DIR: str = ".agents/skills"
     PROMPTS_DIR: str = "executor/prompts"
     MANDATORY_PROMPTS: list[str] = Field(default_factory=lambda: ["planning.md", "coding.md", "review.md"])
+
+    def resolve_path(self, path_str: str) -> Path:
+        p = Path(path_str)
+        if p.is_absolute():
+            return p
+        root = Path(self.PROJECT_ROOT) if hasattr(self, "PROJECT_ROOT") and self.PROJECT_ROOT else Path(__file__).resolve().parent.parent.parent
+        return root / p
+
+    @property
+    def resolved_mcp_config_path(self) -> Path:
+        return self.resolve_path(self.MCP_CONFIG_PATH)
+
+    @property
+    def resolved_skills_dir(self) -> Path:
+        return self.resolve_path(self.SKILLS_DIR)
+
+    @property
+    def resolved_prompts_dir(self) -> Path:
+        return self.resolve_path(self.PROMPTS_DIR)
 
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432

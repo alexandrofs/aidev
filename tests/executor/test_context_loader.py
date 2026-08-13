@@ -13,6 +13,9 @@ def test_executor_settings_context_defaults():
     assert settings.SKILLS_DIR == ".agents/skills"
     assert settings.PROMPTS_DIR == "executor/prompts"
     assert settings.MANDATORY_PROMPTS == ["planning.md", "coding.md", "review.md"]
+    assert str(settings.resolved_mcp_config_path).endswith("mcp_config.json")
+    assert str(settings.resolved_skills_dir).endswith(".agents/skills")
+    assert str(settings.resolved_prompts_dir).endswith("executor/prompts")
 
 
 def test_exceptions_hierarchy():
