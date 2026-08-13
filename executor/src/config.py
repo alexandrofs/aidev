@@ -25,7 +25,7 @@ class ExecutorSettings(BaseSettings):
     MCP_CONFIG_PATH: str = "mcp_config.json"
     SKILLS_DIR: str = ".agents/skills"
     PROMPTS_DIR: str = "executor/prompts"
-    MANDATORY_PROMPTS: list[str] = Field(default_factory=lambda: ["planning.md", "coding.md", "review.md"])
+    MANDATORY_PROMPTS: list[str] = Field(default_factory=lambda: ["coding.md", "review.md"])
 
     def resolve_path(self, path_str: str) -> Path:
         p = Path(path_str)
