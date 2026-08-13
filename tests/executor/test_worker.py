@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from executor.src.config import ExecutorSettings
 from executor.src.worker import ExecutorWorker
 from executor.src.sandbox import DockerSandboxManager
+from executor.src.validation import ValidationResult
 from executor.src.exceptions import PromptTemplateNotFoundError
 from persistence.src.repository import EventRecord
 
@@ -18,6 +19,8 @@ def mock_repo():
     repo.complete_event = AsyncMock()
     repo.fail_event = AsyncMock()
     repo.add_audit_log = AsyncMock()
+    repo.save_agent_memory = AsyncMock(return_value={"id": "mem-1"})
+    repo.get_agent_memory = AsyncMock(return_value=[])
     return repo
 
 
@@ -49,9 +52,9 @@ async def test_worker_claim_and_complete(mock_repo, mock_sandbox, settings):
         event_id="evt-100",
         event_type="workflow.execution",
         status="PROCESSING",
-        payload={"command": "python -c 'print(42)'", "image": "python:3.12-slim", "phase": "coding"}
+        payload={"command": "python -c 'print(42)'", "image": "python:3.12-slim", "phase": "coding", "story_id": "2-3-story"}
     )
-    
+
     mock_repo.claim_event.side_effect = [event, None]
 
     worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
@@ -63,10 +66,19 @@ async def test_worker_claim_and_complete(mock_repo, mock_sandbox, settings):
 
     mock_repo.claim_event.assert_called()
     assert mock_sandbox.execute_job.called
-    call_kwargs = mock_sandbox.execute_job.call_args.kwargs
-    assert call_kwargs["command"] == "python -c 'print(42)'"
-    assert call_kwargs["image"] == "python:3.12-slim"
-    assert call_kwargs["context_bundle"]["phase"] == "coding"
+    first_call_kwargs = mock_sandbox.execute_job.call_args_list[0].kwargs
+    assert first_call_kwargs["command"] == "python -c 'print(42)'"
+    assert first_call_kwargs["image"] == "python:3.12-slim"
+    assert first_call_kwargs["context_bundle"]["phase"] == "coding"
+
+    mock_repo.save_agent_memory.assert_called_once()
+    # F7: verificar que audit log VALIDATION_PASSED foi emitido no fluxo de sucesso
+    validation_passed_calls = [
+        c for c in mock_repo.add_audit_log.call_args_list
+        if c.kwargs.get("action") == "VALIDATION_PASSED"
+    ]
+    assert len(validation_passed_calls) == 1, "Audit log VALIDATION_PASSED deve ser emitido no fluxo de sucesso"
+    assert validation_passed_calls[0].kwargs.get("details", {}).get("story_id") == "2-3-story"
 
     mock_repo.complete_event.assert_called_once()
     call_args = mock_repo.complete_event.call_args
@@ -176,10 +188,10 @@ async def test_worker_invalid_payload(mock_repo, mock_sandbox, settings):
     await task
 
     assert mock_sandbox.execute_job.called
-    call_kwargs = mock_sandbox.execute_job.call_args.kwargs
-    assert call_kwargs["command"] == "echo 'Nenhum comando especificado'"
-    assert call_kwargs["context_bundle"] is not None
-    assert call_kwargs["context_bundle"]["phase"] == "coding"
+    first_call_kwargs = mock_sandbox.execute_job.call_args_list[0].kwargs
+    assert first_call_kwargs["command"] == "echo 'Nenhum comando especificado'"
+    assert first_call_kwargs["context_bundle"] is not None
+    assert first_call_kwargs["context_bundle"]["phase"] == "coding"
     mock_repo.complete_event.assert_called_once()
 
 
@@ -206,7 +218,8 @@ async def test_worker_multi_phase_sequential_execution(mock_repo, mock_sandbox, 
     worker.stop()
     await task
 
-    assert mock_sandbox.execute_job.call_count == 2
+    # 2 execution phases + 1 validation command = 3 execute_job calls
+    assert mock_sandbox.execute_job.call_count == 3
     calls = mock_sandbox.execute_job.call_args_list
     assert calls[0].kwargs["context_bundle"]["phase"] == "coding"
     assert calls[1].kwargs["context_bundle"]["phase"] == "review"
@@ -216,3 +229,49 @@ async def test_worker_multi_phase_sequential_execution(mock_repo, mock_sandbox, 
     assert len(complete_details["phases"]) == 2
     assert complete_details["phases"][0]["phase"] == "coding"
     assert complete_details["phases"][1]["phase"] == "review"
+
+
+@pytest.mark.asyncio
+async def test_worker_validation_failure_blocks_completion(mock_repo, mock_sandbox, settings):
+    event = EventRecord(
+        id="6",
+        event_id="evt-600",
+        event_type="workflow.execution",
+        status="PROCESSING",
+        payload={
+            "command": "python code.py",
+            "story_id": "2-3-pipeline-failure-test"
+        }
+    )
+    mock_repo.claim_event.side_effect = [event, None]
+
+    # First execute_job for phase succeeds, second for validation fails
+    mock_sandbox.execute_job.side_effect = [
+        {"exit_code": 0, "logs": "Code modified OK", "container_id": "c-1"},
+        {"exit_code": 1, "logs": "Pytest failed: 3 tests errored", "container_id": "c-2"}
+    ]
+
+    worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
+
+    task = asyncio.create_task(worker.start())
+    await asyncio.sleep(0.05)
+    worker.stop()
+    await task
+
+    # complete_event should NOT be called
+    mock_repo.complete_event.assert_not_called()
+    # fail_event SHOULD be called with validation failure
+    mock_repo.fail_event.assert_called_once()
+    fail_args = mock_repo.fail_event.call_args
+    assert fail_args.args[0] == "evt-600"
+    assert "Validação pré-entrega falhou" in fail_args.kwargs["error_message"]
+
+    # Audit log VALIDATION_FAILED should be recorded
+    audit_calls = [c for c in mock_repo.add_audit_log.call_args_list if c.kwargs.get("action") == "VALIDATION_FAILED"]
+    assert len(audit_calls) == 1
+
+    # Daily summary memory should still be recorded for the failed validation
+    mock_repo.save_agent_memory.assert_called_once()
+    mem_call = mock_repo.save_agent_memory.call_args.kwargs
+    assert mem_call["story_id"] == "2-3-pipeline-failure-test"
+    assert mem_call["content"]["status"] == "VALIDATION_FAILED"

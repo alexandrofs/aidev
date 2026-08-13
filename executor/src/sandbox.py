@@ -177,3 +177,32 @@ class DockerSandboxManager:
                 "logs": logs,
                 "container_id": getattr(container, "id", None)
             }
+
+    def run_validation(
+        self,
+        commands: Optional[list[str]] = None,
+        image: Optional[str] = None,
+        env_vars: Optional[Dict[str, str]] = None,
+        timeout: Optional[int] = None,
+        context_bundle: Optional[Dict[str, Any]] = None
+    ) -> list[Dict[str, Any]]:
+        """
+        Executa a lista de comandos de validação sequencialmente dentro de containers sandbox efêmeros.
+        """
+        cmds = commands if commands is not None else getattr(self.settings, "VALIDATION_COMMANDS", ["pytest"])
+        results = []
+        for cmd in cmds:
+            res = self.execute_job(
+                command=cmd,
+                image=image,
+                env_vars=env_vars,
+                timeout=timeout,
+                context_bundle=context_bundle
+            )
+            res["command"] = cmd
+            results.append(res)
+            if res.get("exit_code", -1) != 0:
+                logger.warning(f"Comando de validação '{cmd}' falhou no sandbox (exit code {res.get('exit_code')}).")
+                break
+        return results
+
