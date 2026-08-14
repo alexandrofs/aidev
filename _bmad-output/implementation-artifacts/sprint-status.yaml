@@ -89,7 +89,7 @@ action_items:
   - epic: 2
     action: "Criar customize.toml do bmad-code-review bloqueando categoria Defer (enforcement tecnico da Politica Zero Deferred Work)"
     owner: "Amelia"
-    status: open
+    status: done
   - epic: 2
     action: "Resolver idempotencia de save_agent_memory com ON CONFLICT no PostgreSQL"
     owner: "Murat"
@@ -97,7 +97,7 @@ action_items:
   - epic: 2
     action: "Resolver race condition na escrita concorrente do .memlog.md com file lock"
     owner: "Amelia"
-    status: open
+    status: done
   - epic: 2
     action: "Criar mocks da API GraphQL/REST do GitHub para testes isolados (historia 3.1)"
     owner: "Murat"

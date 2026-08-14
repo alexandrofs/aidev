@@ -6,6 +6,11 @@ from typing import Optional, Dict, Any
 from persistence.src.repository import EventRepository
 from executor.src.config import ExecutorSettings, settings as global_settings
 
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
 logger = logging.getLogger(__name__)
 
 # F6: Lock de módulo para serializar escritas no arquivo .memlog.md
@@ -104,22 +109,30 @@ class AgentMemoryManager:
         try:
             memlog_path.parent.mkdir(parents=True, exist_ok=True)
 
-            # F6: lock para serializar escritas concorrentes no mesmo arquivo
+            # F6: Lock de thread + File lock em nível de SO (fcntl.flock) para serializar escritas
+            # concorrentes entre múltiplos processos e workers paralelos.
             with _memlog_write_lock:
-                # F5: verificar se já existe entrada com o mesmo cabeçalho (idempotência em retries)
-                existing_content = ""
-                if memlog_path.exists():
-                    existing_content = memlog_path.read_text(encoding="utf-8")
+                with open(memlog_path, "a+", encoding="utf-8") as f:
+                    if fcntl:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    try:
+                        # F5: verificar se já existe entrada com o mesmo cabeçalho (idempotência em retries)
+                        f.seek(0)
+                        existing_content = f.read()
 
-                if entry_header in existing_content:
-                    logger.info(
-                        f"Entrada para '{story_id}' com timestamp '{timestamp}' já existe "
-                        f"em {memlog_path}. Pulando append (idempotência de retry)."
-                    )
-                    return memlog_path
+                        if entry_header in existing_content:
+                            logger.info(
+                                f"Entrada para '{story_id}' com timestamp '{timestamp}' já existe "
+                                f"em {memlog_path}. Pulando append (idempotência de retry)."
+                            )
+                            return memlog_path
 
-                with open(memlog_path, "a", encoding="utf-8") as f:
-                    f.write(entry_md)
+                        f.seek(0, 2)  # Seek to end of file
+                        f.write(entry_md)
+                        f.flush()
+                    finally:
+                        if fcntl:
+                            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
             logger.info(f"Arquivo de memória .memlog.md atualizado com sucesso em: {memlog_path}")
         except Exception as e:

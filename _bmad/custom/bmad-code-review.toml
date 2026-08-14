@@ -1,2 +1,6 @@
 [workflow]
+persistent_facts = [
+  "POLÍTICA ZERO DEFERRED WORK ATIVA: É estritamente proibido classificar achados de revisão na categoria 'defer' (adiar). Todo achado real deve ser categorizado como 'patch' (e corrigido imediatamente na própria história) ou 'decision_needed' (se requerer decisão do Project Lead/User). Deferrals não são permitidos sem aprovação formal.",
+  "Qualquer débito ou correção identificada durante a revisão deve ser corrigida e verificada com testes na própria história antes de marcar como 'done'."
+]
 on_complete = "Se a história for aprovada e movida para o status done, realizar o commit de todas as alterações pendentes, efetuar o push para a branch remota e abrir o Pull Request (PR)."

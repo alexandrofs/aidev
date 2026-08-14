@@ -152,3 +152,37 @@ def test_sync_memlog_file_concurrent_writes_no_corruption(tmp_path: Path):
     for i in range(10):
         assert content.count(f"## [2026-08-12T23:{i:02d}:00Z]") == 1, \
             f"Entrada {i} duplicada ou corrompida"
+
+
+def _worker_process_write(path_str: str, proc_id: int):
+    mock_repo = MagicMock()
+    manager = AgentMemoryManager(repo=mock_repo)
+    summary = {
+        "timestamp": f"2026-08-12T23:{proc_id:02d}:00Z",
+        "title": f"Process {proc_id}",
+        "status": "COMPLETED",
+        "actions": [f"process_action_{proc_id}"],
+        "test_results": {"passed": proc_id, "failed": 0},
+        "notes": f"process_note_{proc_id}"
+    }
+    manager.sync_memlog_file(Path(path_str), f"story-proc-{proc_id}", summary)
+
+
+def test_sync_memlog_file_multiprocess_writes_with_file_lock(tmp_path: Path):
+    """F6: múltiplos processos do SO concorrendo na escrita do .memlog.md via fcntl.flock."""
+    import multiprocessing
+
+    processes = []
+    for i in range(8):
+        p = multiprocessing.Process(target=_worker_process_write, args=(str(tmp_path), i))
+        processes.append(p)
+        p.start()
+
+    for p in processes:
+        p.join(timeout=5)
+        assert p.exitcode == 0, f"Processo falhou com código de saída {p.exitcode}"
+
+    content = (tmp_path / ".memlog.md").read_text(encoding="utf-8")
+    for i in range(8):
+        assert f"story-proc-{i}" in content, f"Entrada do processo {i} ausente no arquivo"
+        assert content.count(f"## [2026-08-12T23:{i:02d}:00Z]") == 1
