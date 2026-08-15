@@ -215,3 +215,36 @@ def test_sync_memlog_file_with_code_review_metadata(tmp_path: Path):
     assert "- **Resultado dos Testes:** 88 passed, 0 failed" in content
     assert "- **Aprendizados/Decisões:** Code review passed with zero deferred work." in content
 
+
+def test_sync_memlog_file_with_pr_metadata(tmp_path: Path):
+    """[Story 3.2 Task 4] sync_memlog_file deve incluir link e metadados do Pull Request aberto para revisão humana."""
+    mock_repo = MagicMock()
+    manager = AgentMemoryManager(repo=mock_repo)
+
+    summary = {
+        "timestamp": "2026-08-15T00:10:00Z",
+        "title": "Geração e Abertura Semântica de PR",
+        "status": "COMPLETED",
+        "actions": ["Opened Pull Request #42 on GitHub"],
+        "pr_url": "https://github.com/org/repo/pull/42",
+        "pr_number": 42,
+        "pull_request_status": "OPEN",
+        "review_summary": {
+            "status": "APPROVED",
+            "findings_count": 0,
+            "patches_applied": 0,
+            "deferred_count": 0
+        },
+        "test_results": {"passed": 95, "failed": 0},
+        "decisions": "PR generated and submitted for human review."
+    }
+
+    memlog_file = manager.sync_memlog_file(tmp_path, "3-2-pr", summary)
+    content = memlog_file.read_text(encoding="utf-8")
+
+    assert "https://github.com/org/repo/pull/42" in content
+    assert "Pull Request" in content
+    assert "#42" in content
+    assert "Revisão Humana" in content or "Aguardando Revisão" in content
+
+

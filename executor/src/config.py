@@ -30,6 +30,14 @@ class ExecutorSettings(BaseSettings):
     VALIDATION_COMMANDS: list[str] = Field(default_factory=lambda: ["pytest"])
     MEMLOG_FILENAME: str = ".memlog.md"
 
+    # Configurações de integração com GitHub (Story 3.2)
+    GITHUB_TOKEN: Optional[str] = None
+    GITHUB_REPOSITORY: Optional[str] = None
+    GITHUB_API_URL: str = "https://api.github.com"
+    GITHUB_BASE_BRANCH: str = "main"
+    GITHUB_PROJECT_ID: Optional[str] = None
+    GITHUB_DRY_RUN: bool = False
+
     def resolve_path(self, path_str: str) -> Path:
         p = Path(path_str)
         if p.is_absolute():

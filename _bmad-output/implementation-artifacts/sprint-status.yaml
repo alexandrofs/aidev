@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-09T22:08:58-03:00
-last_updated: 2026-08-13T23:10:00-03:00
+last_updated: 2026-08-15T00:11:00-03:00
 project: AI Developer
 project_key: NOKEY
 tracking_system: file-system
@@ -58,9 +58,9 @@ development_status:
   2-2-injecao-dinamica-de-contexto-mcps-skills-e-prompts: done
   2-3-pipeline-de-validacao-local-testes-linters-e-memoria-hierarquica-diaria: done
   epic-2-retrospective: done
-  epic-3: in-progress
+  epic-3: done
   3-1-workflow-de-desenvolvimento-autonomo-e-code-review-sem-pr-precoce: done
-  3-2-geracao-e-abertura-semantica-de-pull-requests-para-revisao-humana: backlog
+  3-2-geracao-e-abertura-semantica-de-pull-requests-para-revisao-humana: done
   epic-3-retrospective: optional
   epic-4: backlog
   4-1-monitoramento-de-webhooks-de-ci-e-ciclo-de-autocorrecao-ate-3-tentativas: backlog

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from executor.src.sandbox import DockerSandboxManager
 from executor.src.context_loader import ContextLoader
 from executor.src.validation import ValidationPipeline
 from executor.src.memory import AgentMemoryManager
+from executor.src.github import GitHubClient, GitHubAPIError, GitHubAuthError
 from executor.src.exceptions import ContextError
 from persistence.src.repository import EventRepository, EventRecord
 
@@ -21,7 +23,9 @@ class ExecutorWorker:
     1. Injeção dinâmica de contexto
     2. Execução das fases no Sandbox Docker
     3. Pipeline de validação local pré-entrega (testes / linters)
-    4. Persistência de memória hierárquica (PostgreSQL agent_memory + repositório .memlog.md)
+    4. Geração semântica e abertura de Pull Request no GitHub
+    5. Sincronização de status com GitHub Projects v2
+    6. Persistência de memória hierárquica (PostgreSQL agent_memory + repositório .memlog.md)
     """
 
     def __init__(
@@ -31,6 +35,7 @@ class ExecutorWorker:
         context_loader: Optional[ContextLoader] = None,
         validation_pipeline: Optional[ValidationPipeline] = None,
         memory_manager: Optional[AgentMemoryManager] = None,
+        github_client: Optional[GitHubClient] = None,
         settings: Optional[ExecutorSettings] = None,
         event_types: Optional[List[str]] = None
     ):
@@ -40,6 +45,7 @@ class ExecutorWorker:
         self.context_loader = context_loader or ContextLoader(settings_override=self.settings)
         self.validation_pipeline = validation_pipeline or ValidationPipeline(sandbox_manager=self.sandbox_manager, settings=self.settings)
         self.memory_manager = memory_manager or AgentMemoryManager(repo=self.repo, settings=self.settings)
+        self.github_client = github_client or GitHubClient(settings=self.settings)
         self.event_types = event_types or ["workflow.execution"]
         self.running = False
         self.current_poll_interval = self.settings.POLL_INTERVAL
@@ -270,6 +276,129 @@ class ExecutorWorker:
                 except Exception as log_err:
                     logger.warning(f"Erro ao registrar audit_log VALIDATION_PASSED: {log_err}")
 
+            # 4. Publicação de Branch e Abertura do Pull Request (Story 3.2)
+            repo_name = payload.get("repository") or payload.get("repo") or getattr(self.settings, "GITHUB_REPOSITORY", None)
+            is_dry_run = getattr(self.settings, "GITHUB_DRY_RUN", False)
+            has_token = bool(getattr(self.settings, "GITHUB_TOKEN", None))
+            pr_info = None
+
+            if repo_name or is_dry_run:
+                target_repo = repo_name or "local/repo"
+                clean_story = re.sub(r"^story-?", "", str(story_id).strip(), flags=re.IGNORECASE).strip()
+                head_branch = payload.get("head_branch") or payload.get("branch") or f"feature/story-{clean_story}"
+                base_branch = payload.get("base_branch") or getattr(self.settings, "GITHUB_BASE_BRANCH", "main")
+                title_text = payload.get("title") or payload.get("story_title") or f"Story {story_id}"
+                project_item_id = payload.get("project_item_id") or payload.get("project_card_id")
+                project_id = payload.get("project_id") or getattr(self.settings, "GITHUB_PROJECT_ID", None)
+                project_field_id = payload.get("project_field_id")
+                project_option_id = payload.get("project_option_id")
+
+                if hasattr(self.repo, "add_audit_log"):
+                    try:
+                        await self.repo.add_audit_log(
+                            event_id=event.event_id,
+                            action="PR_CREATION_STARTED",
+                            actor=self.settings.WORKER_ID,
+                            details={
+                                "story_id": story_id,
+                                "repository": target_repo,
+                                "head_branch": head_branch,
+                                "base_branch": base_branch
+                            }
+                        )
+                    except Exception as log_err:
+                        logger.warning(f"Erro ao registrar audit_log PR_CREATION_STARTED: {log_err}")
+
+                pr_title = self.github_client.generate_pr_title(story_id=story_id, title=title_text)
+                pr_body = self.github_client.format_semantic_pr_body(
+                    story_id=story_id,
+                    title=title_text,
+                    phase_results=phase_results,
+                    validation_results=validation_results,
+                    review_summary=review_summary,
+                    project_item_id=project_item_id
+                )
+
+                try:
+                    pr_info = await self.github_client.create_pull_request(
+                        repo=target_repo,
+                        title=pr_title,
+                        body=pr_body,
+                        head_branch=head_branch,
+                        base_branch=base_branch
+                    )
+                    logger.info(f"Pull Request criado com sucesso: {pr_info.get('pr_html_url') or pr_info.get('pr_url')}")
+
+                    if hasattr(self.repo, "add_audit_log"):
+                        try:
+                            await self.repo.add_audit_log(
+                                event_id=event.event_id,
+                                action="PR_CREATED",
+                                actor=self.settings.WORKER_ID,
+                                details={
+                                    "story_id": story_id,
+                                    "pr_number": pr_info.get("pr_number"),
+                                    "pr_url": pr_info.get("pr_url"),
+                                    "pr_html_url": pr_info.get("pr_html_url"),
+                                    "head_branch": pr_info.get("head_branch"),
+                                    "commit_sha": pr_info.get("commit_sha")
+                                }
+                            )
+                        except Exception as log_err:
+                            logger.warning(f"Erro ao registrar audit_log PR_CREATED: {log_err}")
+
+                    # Sincronização do GitHub Projects v2 (AC: 3)
+                    if project_item_id and project_id:
+                        try:
+                            await self.github_client.update_project_card_status(
+                                project_id=project_id,
+                                item_id=project_item_id,
+                                field_id=project_field_id or "status",
+                                option_id=project_option_id or "review"
+                            )
+                            if hasattr(self.repo, "add_audit_log"):
+                                try:
+                                    await self.repo.add_audit_log(
+                                        event_id=event.event_id,
+                                        action="PROJECTS_CARD_UPDATED",
+                                        actor=self.settings.WORKER_ID,
+                                        details={
+                                            "project_id": project_id,
+                                            "item_id": project_item_id,
+                                            "story_id": story_id
+                                        }
+                                    )
+                                except Exception as log_err:
+                                    logger.warning(f"Erro ao registrar audit_log PROJECTS_CARD_UPDATED: {log_err}")
+                        except Exception as proj_err:
+                            logger.warning(f"Erro ao atualizar status do card no GitHub Projects v2: {proj_err}")
+
+                except Exception as pr_err:
+                    err_msg = f"Falha na abertura de Pull Request no GitHub: {pr_err}"
+                    logger.error(err_msg, exc_info=True)
+                    if hasattr(self.repo, "add_audit_log"):
+                        try:
+                            await self.repo.add_audit_log(
+                                event_id=event.event_id,
+                                action="PR_FAILED",
+                                actor=self.settings.WORKER_ID,
+                                details={"story_id": story_id, "error": str(pr_err)}
+                            )
+                        except Exception as log_err:
+                            logger.warning(f"Erro ao registrar audit_log PR_FAILED: {log_err}")
+                    await self.repo.fail_event(
+                        event.event_id,
+                        self.settings.WORKER_ID,
+                        error_message=err_msg
+                    )
+                    return
+
+            if pr_info:
+                summary_data["pr_url"] = pr_info.get("pr_html_url") or pr_info.get("pr_url")
+                summary_data["pr_number"] = pr_info.get("pr_number")
+                summary_data["pull_request_status"] = "OPEN"
+                summary_data["head_branch"] = pr_info.get("head_branch")
+
             # Persistência Nível 2 (PostgreSQL agent_memory)
             # F5: event_id passado para ativar UPSERT idempontente no repositório
             await self.memory_manager.record_daily_summary(
@@ -294,9 +423,13 @@ class ExecutorWorker:
 
             # Conclusão do Evento
             last_result = phase_results[-1] if phase_results else {}
+            validation_details = [
+                (res.model_dump() if hasattr(res, "model_dump") else (dict(res) if isinstance(res, dict) else vars(res)))
+                for res in validation_results
+            ]
             details = {
                 "phases": phase_results,
-                "validation_results": [res.model_dump() for res in validation_results],
+                "validation_results": validation_details,
                 "exit_code": last_result.get("exit_code", 0),
                 "logs": last_result.get("logs", ""),
                 "container_id": last_result.get("container_id", ""),
@@ -304,6 +437,12 @@ class ExecutorWorker:
             }
             if "review" in phases:
                 details["review_summary"] = review_summary
+            if pr_info:
+                details["pr_number"] = pr_info.get("pr_number")
+                details["pr_url"] = pr_info.get("pr_html_url") or pr_info.get("pr_url")
+                details["head_branch"] = pr_info.get("head_branch")
+                details["base_branch"] = pr_info.get("base_branch")
+                details["commit_sha"] = pr_info.get("commit_sha")
 
             await self.repo.complete_event(
                 event.event_id,

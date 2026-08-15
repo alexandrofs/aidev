@@ -108,6 +108,14 @@ class AgentMemoryManager:
         elif "review_status" in summary_data:
             review_line = f"- **Code Review Interno:** {summary_data.get('review_status')}\n"
 
+        # Metadados de Pull Request (Story 3.2 AC: 4)
+        pr_url = summary_data.get("pr_url")
+        pr_number = summary_data.get("pr_number")
+        pr_line = ""
+        if pr_url:
+            pr_num_str = f" #{pr_number}" if pr_number else ""
+            pr_line = f"- **Pull Request:** [PR{pr_num_str}]({pr_url}) (Aguardando Revisão Humana)\n"
+
         # Cabeçalho único da entrada — usado para verificar duplicata
         entry_header = f"## [{timestamp}] - Story {story_id}: {title}"
         entry_md = (
@@ -115,6 +123,7 @@ class AgentMemoryManager:
             f"- **Status:** {status}\n"
             f"- **Ações Realizadas:** {actions}\n"
             f"{review_line}"
+            f"{pr_line}"
             f"- **Resultado dos Testes:** {test_results}\n"
             f"- **Aprendizados/Decisões:** {decisions}\n\n"
         )
