@@ -26,6 +26,7 @@ class ExecutorSettings(BaseSettings):
     SKILLS_DIR: str = ".agents/skills"
     PROMPTS_DIR: str = "executor/prompts"
     MANDATORY_PROMPTS: list[str] = Field(default_factory=lambda: ["coding.md", "review.md"])
+    DEFAULT_WORKFLOW_PHASES: list[str] = Field(default_factory=lambda: ["coding", "review"])
     VALIDATION_COMMANDS: list[str] = Field(default_factory=lambda: ["pytest"])
     MEMLOG_FILENAME: str = ".memlog.md"
 

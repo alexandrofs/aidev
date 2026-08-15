@@ -245,10 +245,11 @@ async def test_worker_validation_failure_blocks_completion(mock_repo, mock_sandb
     )
     mock_repo.claim_event.side_effect = [event, None]
 
-    # First execute_job for phase succeeds, second for validation fails
+    # Phases: coding=0, review=0, then validation=1 (fails)
     mock_sandbox.execute_job.side_effect = [
-        {"exit_code": 0, "logs": "Code modified OK", "container_id": "c-1"},
-        {"exit_code": 1, "logs": "Pytest failed: 3 tests errored", "container_id": "c-2"}
+        {"exit_code": 0, "logs": "Coding completed OK", "container_id": "c-1"},
+        {"exit_code": 0, "logs": "Review completed OK", "container_id": "c-2"},
+        {"exit_code": 1, "logs": "Pytest failed: 3 tests errored", "container_id": "c-3"}
     ]
 
     worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
@@ -275,3 +276,98 @@ async def test_worker_validation_failure_blocks_completion(mock_repo, mock_sandb
     mem_call = mock_repo.save_agent_memory.call_args.kwargs
     assert mem_call["story_id"] == "2-3-pipeline-failure-test"
     assert mem_call["content"]["status"] == "VALIDATION_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_worker_review_phase_failure_triggers_audit_and_stops(mock_repo, mock_sandbox, settings):
+    event = EventRecord(
+        id="7",
+        event_id="evt-700",
+        event_type="workflow.execution",
+        status="PROCESSING",
+        payload={
+            "command": "python code.py",
+            "story_id": "3-1-review-fail-test",
+            "phases": ["coding", "review"]
+        }
+    )
+    mock_repo.claim_event.side_effect = [event, None]
+
+    # Coding phase succeeds, Review phase fails
+    mock_sandbox.execute_job.side_effect = [
+        {"exit_code": 0, "logs": "Coding OK", "container_id": "c-1"},
+        {"exit_code": 1, "logs": "Review found syntax errors and unhandled exceptions", "container_id": "c-2"}
+    ]
+
+    worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
+
+    task = asyncio.create_task(worker.start())
+    await asyncio.sleep(0.05)
+    worker.stop()
+    await task
+
+    mock_repo.complete_event.assert_not_called()
+    mock_repo.fail_event.assert_called_once()
+    fail_args = mock_repo.fail_event.call_args
+    assert "Job da fase 'review' encerrado com erro" in fail_args.kwargs["error_message"]
+
+    # Check that CODE_REVIEW_FAILED audit log was recorded
+    review_failed_logs = [c for c in mock_repo.add_audit_log.call_args_list if c.kwargs.get("action") == "CODE_REVIEW_FAILED"]
+    assert len(review_failed_logs) == 1
+    assert review_failed_logs[0].kwargs.get("details", {}).get("story_id") == "3-1-review-fail-test"
+
+
+@pytest.mark.asyncio
+async def test_worker_full_story_3_1_workflow_audit_and_readiness(mock_repo, mock_sandbox, settings):
+    event = EventRecord(
+        id="8",
+        event_id="evt-800",
+        event_type="workflow.execution",
+        status="PROCESSING",
+        payload={
+            "command": "python dev_pipeline.py",
+            "story_id": "3-1-autonomous-dev",
+            "review_summary": {
+                "status": "APPROVED",
+                "findings_count": 3,
+                "patches_applied": 3,
+                "deferred_count": 0
+            }
+        }
+    )
+    mock_repo.claim_event.side_effect = [event, None]
+    # Default flow: coding(0), review(0), validation(0)
+    mock_sandbox.execute_job.side_effect = [
+        {"exit_code": 0, "logs": "Coding phase completed", "container_id": "c-code"},
+        {"exit_code": 0, "logs": "Review phase completed (3 patches applied)", "container_id": "c-rev"},
+        {"exit_code": 0, "logs": "Pytest 87 passed", "container_id": "c-val"}
+    ]
+
+    worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
+
+    task = asyncio.create_task(worker.start())
+    await asyncio.sleep(0.05)
+    worker.stop()
+    await task
+
+    # Check audit log trail
+    audit_actions = [c.kwargs.get("action") for c in mock_repo.add_audit_log.call_args_list]
+    assert "WORKFLOW_PHASE_STARTED" in audit_actions
+    assert "WORKFLOW_PHASE_COMPLETED" in audit_actions
+    assert "CODE_REVIEW_PASSED" in audit_actions
+    assert "VALIDATION_PASSED" in audit_actions
+
+    # Check complete_event details
+    mock_repo.complete_event.assert_called_once()
+    complete_details = mock_repo.complete_event.call_args.kwargs["details"]
+    assert complete_details["ready_for_pr"] is True
+    assert complete_details["review_summary"]["patches_applied"] == 3
+    assert complete_details["review_summary"]["deferred_count"] == 0
+    assert len(complete_details["phases"]) == 2
+
+    # Check memory persistence
+    mock_repo.save_agent_memory.assert_called_once()
+    mem_content = mock_repo.save_agent_memory.call_args.kwargs["content"]
+    assert mem_content["review_summary"]["status"] == "APPROVED"
+    assert mem_content["review_summary"]["patches_applied"] == 3
+

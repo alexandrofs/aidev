@@ -61,18 +61,18 @@ NFR6: Manutenibilidade - O fluxo deve ser modular o suficiente para permitir exp
 
 ### FR Coverage Map
 
-- **FR1:** Épico 3 (Story 3.1)
+- **FR1:** Épico 3 (Story 3.1, Story 3.2 via MCP / gh CLI)
 - **FR2:** Épico 1 (Story 1.2)
 - **FR3:** Épico 1 (Story 1.2)
 - **FR4:** Épico 1 (Story 1.3)
-- **FR5:** Épico 2 & Épico 3 (Story 2.1, Story 3.2)
-- **FR6:** Épico 3 (Story 3.3)
+- **FR5:** Épico 2 & Épico 3 (Story 2.1, Story 3.1)
+- **FR6:** Épico 3 (Story 3.2)
 - **FR7:** Épico 2 (Story 2.1)
 - **FR8:** Épico 2 (Story 2.3)
 - **FR9:** Épico 4 (Story 4.1)
 - **FR10:** Épico 4 (Story 4.2)
 - **FR11:** Épico 4 (Story 4.3)
-- **FR12:** Épico 1 & Épico 3 (Story 1.2, Story 3.1)
+- **FR12:** Épico 1 & Épico 3 (Story 1.2, Story 3.1, Story 3.2)
 - **FR13:** Épico 2 (Story 2.3)
 
 ## Epic List
@@ -85,8 +85,8 @@ O desenvolvedor/sistema possui um serviço HTTP confiável (`ai-dev-api`) e even
 O agente de desenvolvimento (`ai-dev-executor`) consome eventos elegíveis do PostgreSQL via trava de registro (`SKIP LOCKED`), inicializando um sandbox Docker efêmero com injeção de MCPs, Skills e Prompts para realizar alterações no código, executar testes/linters locais e manter memória hierárquica diária.
 **FRs cobertos:** FR5, FR7, FR8, FR13
 
-### Epic 3: Integração com GitHub, Workflow de Code Review e Abertura de PRs (GitHub Workflow & PR Automation)
-O sistema sincroniza o status dos cards no GitHub Projects v2, executa o workflow autônomo de Code Review para histórias prontas e abre Pull Requests semânticos validados para revisão humana, mantendo o histórico nos cards e issues.
+### Epic 3: Workflow de Desenvolvimento Autônomo, Code Review e Abertura de PRs (Autonomous Dev & PR Automation)
+O sistema orquestra as fases de desenvolvimento e code review interno no sandbox efêmero via agente autônomo (munido de MCPs e CLI `gh`), gerando e abrindo Pull Requests semânticos validados para revisão humana e sincronizando o status dos cards no GitHub Projects v2.
 **FRs cobertos:** FR1, FR5, FR6, FR12
 
 ### Epic 4: Resiliência de CI, Notificações HITL e Gestão de Intervenção Humana (CI Auto-Healing & HITL Notifications)
@@ -185,24 +185,11 @@ So that alterações incorretas sejam bloqueadas antes da entrega e a memória d
 
 ---
 
-## Epic 3: Integração com GitHub, Workflow de Code Review e Abertura de PRs (GitHub Workflow & PR Automation)
+## Epic 3: Workflow de Desenvolvimento Autônomo, Code Review e Abertura de PRs (Autonomous Dev & PR Automation)
 
-O sistema sincroniza o status dos cards no GitHub Projects v2, executa o workflow autônomo de Code Review para histórias prontas e abre Pull Requests semânticos validados para revisão humana, mantendo o histórico nos cards e issues.
+O sistema orquestra as fases de desenvolvimento e code review interno no sandbox efêmero via agente autônomo (munido de MCPs e CLI `gh`), gerando e abrindo Pull Requests semânticos validados para revisão humana e sincronizando o status dos cards no GitHub Projects v2.
 
-### Story 3.1: Integração com API GraphQL/REST do GitHub e Sincronização do GitHub Projects v2
-
-As a equipe de desenvolvimento,
-I want que o `ai-dev-executor` interaja com as APIs GraphQL e REST do GitHub para ler e atualizar cards, issues e status do GitHub Projects v2,
-So that o quadro kanban de acompanhamento permaneça atualizado automaticamente durante a execução.
-
-**Acceptance Criteria:**
-
-**Given** uma alteração de estado no processamento de uma história de usuário pelo agente
-**When** a etapa for concluída no executor
-**Then** o card correspondente no GitHub Projects v2 deve ser atualizado com o status correto (ex: "In Progress", "In Review") via chamadas autenticadas à API do GitHub
-**And** toda mutação direta no GitHub deve ser de responsabilidade exclusiva do componente `ai-dev-executor`.
-
-### Story 3.2: Workflow de Desenvolvimento Autônomo e Code Review sem PR Precoce
+### Story 3.1: Workflow de Desenvolvimento Autônomo e Code Review sem PR Precoce
 
 As a agente AI Developer,
 I want executar o workflow de desenvolvimento e em seguida o workflow interno de code review antes de abrir a Pull Request pública,
@@ -211,22 +198,22 @@ So that propostas de código brutas sejam refatoradas e auto-auditadas antes de 
 **Acceptance Criteria:**
 
 **Given** um evento de história movida para "Ready for AI Dev"
-**When** o worker executar a primeira fase de desenvolvimento
-**Then** o agente deve aplicar as modificações, passar pela revisão interna de regras e critérios de aceite no sandbox sem abrir PR pública pré-matura
-**And** o resultado do code review interno deve ser anexado aos registros do evento no banco de dados.
+**When** o worker executar a primeira fase de desenvolvimento no sandbox
+**Then** o agente deve aplicar as modificações no código, executar a revisão interna de regras e critérios de aceite no sandbox sem abrir PR pública prematura
+**And** o resultado do code review interno deve ser anexado aos registros do evento no banco de dados e na memória do agente.
 
-### Story 3.3: Geração e Abertura Semântica de Pull Requests para Revisão Humana
+### Story 3.2: Geração e Abertura Semântica de Pull Requests para Revisão Humana
 
 As a revisor humano,
-I want receber um Pull Request estruturado no GitHub com a descrição clara das alterações, contexto da história e evidências das validações locais,
+I want receber um Pull Request estruturado no GitHub com a descrição clara das alterações, contexto da história e evidências das validações locais (via `gh` CLI / GitHub MCP),
 So that eu possa realizar a revisão de código final com agilidade e rastreabilidade.
 
 **Acceptance Criteria:**
 
 **Given** a conclusão bem-sucedida do workflow de code review interno no sandbox
 **When** a etapa de publicação for alcançada
-**Then** o `ai-dev-executor` deve realizar o push do branch e abrir uma Pull Request no GitHub contendo título semântico, corpo formatado com resumo das mudanças, testes executados e link para o card original
-**And** o evento deve ser atualizado para status `COMPLETED`.
+**Then** o `ai-dev-executor` deve orquestrar o push do branch e a abertura de uma Pull Request no GitHub contendo título semântico, corpo formatado com resumo das mudanças, testes executados e link para o card original
+**And** o evento deve ser atualizado para status `COMPLETED` e o card correspondente atualizado no GitHub Projects v2.
 
 ---
 
