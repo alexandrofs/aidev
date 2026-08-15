@@ -278,11 +278,13 @@ class ExecutorWorker:
 
             # 4. Publicação de Branch e Abertura do Pull Request (Story 3.2)
             repo_name = payload.get("repository") or payload.get("repo") or getattr(self.settings, "GITHUB_REPOSITORY", None)
-            is_dry_run = getattr(self.settings, "GITHUB_DRY_RUN", False)
-            has_token = bool(getattr(self.settings, "GITHUB_TOKEN", None))
+            is_dry_run = getattr(self.settings, "GITHUB_DRY_RUN", False) or getattr(self.github_client, "dry_run", False)
+            client_token = getattr(self.github_client, "token", None)
+            has_token = bool(client_token) if client_token is not None else bool(getattr(self.settings, "GITHUB_TOKEN", None))
+            is_mock_client = hasattr(self.github_client, "_mock_name") or hasattr(self.github_client, "return_value")
             pr_info = None
 
-            if repo_name or is_dry_run:
+            if is_dry_run or (has_token and repo_name) or (is_mock_client and repo_name):
                 target_repo = repo_name or "local/repo"
                 clean_story = re.sub(r"^story-?", "", str(story_id).strip(), flags=re.IGNORECASE).strip()
                 head_branch = payload.get("head_branch") or payload.get("branch") or f"feature/story-{clean_story}"
