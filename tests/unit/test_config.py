@@ -55,3 +55,42 @@ def test_get_database_url_reflects_custom_port():
     assert "5433" in url
     assert "db-host" in url
     assert "testdb" in url
+
+
+def test_executor_settings_github_defaults():
+    """[Story 3.2 Task 1] ExecutorSettings deve possuir configurações default para integração com GitHub."""
+    from executor.src.config import ExecutorSettings
+
+    s = ExecutorSettings(
+        GITHUB_TOKEN=None,
+        GITHUB_REPOSITORY=None,
+        PROJECT_ROOT="/tmp"
+    )
+    assert s.GITHUB_TOKEN is None
+    assert s.GITHUB_REPOSITORY is None
+    assert s.GITHUB_API_URL == "https://api.github.com"
+    assert s.GITHUB_BASE_BRANCH == "main"
+    assert s.GITHUB_PROJECT_ID is None
+    assert s.GITHUB_DRY_RUN is False
+
+
+def test_executor_settings_github_custom_values():
+    """[Story 3.2 Task 1] ExecutorSettings deve aceitar valores customizados de configuração do GitHub."""
+    from executor.src.config import ExecutorSettings
+
+    s = ExecutorSettings(
+        GITHUB_TOKEN="ghp_test123456",
+        GITHUB_REPOSITORY="org/repo-test",
+        GITHUB_API_URL="https://api.github.enterprise.com",
+        GITHUB_BASE_BRANCH="develop",
+        GITHUB_PROJECT_ID="PVT_kwDOA12345",
+        GITHUB_DRY_RUN=True,
+        PROJECT_ROOT="/tmp"
+    )
+    assert s.GITHUB_TOKEN == "ghp_test123456"
+    assert s.GITHUB_REPOSITORY == "org/repo-test"
+    assert s.GITHUB_API_URL == "https://api.github.enterprise.com"
+    assert s.GITHUB_BASE_BRANCH == "develop"
+    assert s.GITHUB_PROJECT_ID == "PVT_kwDOA12345"
+    assert s.GITHUB_DRY_RUN is True
+

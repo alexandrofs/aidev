@@ -371,3 +371,203 @@ async def test_worker_full_story_3_1_workflow_audit_and_readiness(mock_repo, moc
     assert mem_content["review_summary"]["status"] == "APPROVED"
     assert mem_content["review_summary"]["patches_applied"] == 3
 
+
+@pytest.mark.asyncio
+async def test_worker_successful_pr_creation_and_audit_logs(mock_repo, mock_sandbox, settings):
+    """[Story 3.2 Task 3] Worker deve abrir Pull Request semântico, emitir logs PR_CREATION_STARTED e PR_CREATED e persistir metadados."""
+    from executor.src.github import GitHubClient
+
+    mock_github = MagicMock(spec=GitHubClient)
+    mock_github.generate_pr_title.return_value = "feat(story-3.2): Geracao e Abertura Semantica de PR"
+    mock_github.format_semantic_pr_body.return_value = "## 🤖 AI Developer — Pull Request de Entrega"
+    mock_github.create_pull_request = AsyncMock(return_value={
+        "pr_number": 42,
+        "pr_url": "https://api.github.com/repos/org/repo/pulls/42",
+        "pr_html_url": "https://github.com/org/repo/pull/42",
+        "head_branch": "feature/story-3.2",
+        "base_branch": "main",
+        "commit_sha": "abc123sha"
+    })
+
+    event = EventRecord(
+        id="9",
+        event_id="evt-900",
+        event_type="workflow.execution",
+        status="PROCESSING",
+        payload={
+            "command": "python run.py",
+            "story_id": "3.2",
+            "repository": "org/repo",
+            "branch": "feature/story-3.2"
+        }
+    )
+    mock_repo.claim_event.side_effect = [event, None]
+    mock_sandbox.execute_job.side_effect = [
+        {"exit_code": 0, "logs": "Coding OK", "container_id": "c-code"},
+        {"exit_code": 0, "logs": "Review OK", "container_id": "c-rev"},
+        {"exit_code": 0, "logs": "Pytest OK", "container_id": "c-val"}
+    ]
+
+    worker = ExecutorWorker(
+        repo=mock_repo,
+        sandbox_manager=mock_sandbox,
+        github_client=mock_github,
+        settings=settings
+    )
+
+    task = asyncio.create_task(worker.start())
+    await asyncio.sleep(0.05)
+    worker.stop()
+    await task
+
+    # 1. GitHubClient methods called
+    mock_github.generate_pr_title.assert_called_once()
+    mock_github.format_semantic_pr_body.assert_called_once()
+    mock_github.create_pull_request.assert_called_once_with(
+        repo="org/repo",
+        title="feat(story-3.2): Geracao e Abertura Semantica de PR",
+        body="## 🤖 AI Developer — Pull Request de Entrega",
+        head_branch="feature/story-3.2",
+        base_branch="main"
+    )
+
+    # 2. Audit logs emitted: PR_CREATION_STARTED, PR_CREATED
+    audit_actions = [c.kwargs.get("action") for c in mock_repo.add_audit_log.call_args_list]
+    assert "PR_CREATION_STARTED" in audit_actions
+    assert "PR_CREATED" in audit_actions
+
+    pr_created_call = next(c for c in mock_repo.add_audit_log.call_args_list if c.kwargs.get("action") == "PR_CREATED")
+    assert pr_created_call.kwargs["details"]["pr_number"] == 42
+    assert pr_created_call.kwargs["details"]["pr_html_url"] == "https://github.com/org/repo/pull/42"
+
+    # 3. Complete event contains PR details
+    mock_repo.complete_event.assert_called_once()
+    complete_details = mock_repo.complete_event.call_args.kwargs["details"]
+    assert complete_details["pr_number"] == 42
+    assert complete_details["pr_url"] == "https://github.com/org/repo/pull/42"
+    assert complete_details["commit_sha"] == "abc123sha"
+
+    # 4. Memory persistence contains PR metadata
+    mock_repo.save_agent_memory.assert_called_once()
+    mem_content = mock_repo.save_agent_memory.call_args.kwargs["content"]
+    assert mem_content["pr_number"] == 42
+    assert mem_content["pr_url"] == "https://github.com/org/repo/pull/42"
+    assert mem_content["pull_request_status"] == "OPEN"
+
+
+@pytest.mark.asyncio
+async def test_worker_projects_card_updated_when_project_item_present(mock_repo, mock_sandbox, settings):
+    """[Story 3.2 Task 3] Worker deve atualizar card no Projects v2 e emitir log PROJECTS_CARD_UPDATED."""
+    from executor.src.github import GitHubClient
+
+    mock_github = MagicMock(spec=GitHubClient)
+    mock_github.generate_pr_title.return_value = "feat(story-3.2): Title"
+    mock_github.format_semantic_pr_body.return_value = "Body"
+    mock_github.create_pull_request = AsyncMock(return_value={
+        "pr_number": 101,
+        "pr_url": "https://api.github.com/repos/org/repo/pulls/101",
+        "pr_html_url": "https://github.com/org/repo/pull/101",
+        "head_branch": "feature/story-3.2",
+        "base_branch": "main",
+        "commit_sha": "def456"
+    })
+    mock_github.update_project_card_status = AsyncMock(return_value={"updated": True, "item_id": "PVTI_item999"})
+
+    event = EventRecord(
+        id="10",
+        event_id="evt-1000",
+        event_type="workflow.execution",
+        status="PROCESSING",
+        payload={
+            "command": "python run.py",
+            "story_id": "3.2",
+            "repository": "org/repo",
+            "project_id": "PVT_proj777",
+            "project_item_id": "PVTI_item999",
+            "project_field_id": "PVTF_status",
+            "project_option_id": "opt_review"
+        }
+    )
+    mock_repo.claim_event.side_effect = [event, None]
+    mock_sandbox.execute_job.side_effect = [
+        {"exit_code": 0, "logs": "Coding OK", "container_id": "c-1"},
+        {"exit_code": 0, "logs": "Review OK", "container_id": "c-2"},
+        {"exit_code": 0, "logs": "Pytest OK", "container_id": "c-3"}
+    ]
+
+    worker = ExecutorWorker(
+        repo=mock_repo,
+        sandbox_manager=mock_sandbox,
+        github_client=mock_github,
+        settings=settings
+    )
+
+    task = asyncio.create_task(worker.start())
+    await asyncio.sleep(0.05)
+    worker.stop()
+    await task
+
+    mock_github.update_project_card_status.assert_called_once_with(
+        project_id="PVT_proj777",
+        item_id="PVTI_item999",
+        field_id="PVTF_status",
+        option_id="opt_review"
+    )
+
+    audit_actions = [c.kwargs.get("action") for c in mock_repo.add_audit_log.call_args_list]
+    assert "PROJECTS_CARD_UPDATED" in audit_actions
+
+
+@pytest.mark.asyncio
+async def test_worker_pr_failure_emits_pr_failed_audit_and_fails_event(mock_repo, mock_sandbox, settings):
+    """[Story 3.2 Task 3] Falha na criação do PR deve emitir PR_FAILED e acionar fail_event."""
+    from executor.src.github import GitHubClient, GitHubAPIError
+
+    mock_github = MagicMock(spec=GitHubClient)
+    mock_github.generate_pr_title.return_value = "feat(story-3.2): Title"
+    mock_github.format_semantic_pr_body.return_value = "Body"
+    mock_github.create_pull_request = AsyncMock(side_effect=GitHubAPIError("403 Forbidden - Rate limit exceeded"))
+
+    event = EventRecord(
+        id="11",
+        event_id="evt-1100",
+        event_type="workflow.execution",
+        status="PROCESSING",
+        payload={
+            "command": "python run.py",
+            "story_id": "3.2",
+            "repository": "org/repo"
+        }
+    )
+    mock_repo.claim_event.side_effect = [event, None]
+    mock_sandbox.execute_job.side_effect = [
+        {"exit_code": 0, "logs": "Coding OK", "container_id": "c-1"},
+        {"exit_code": 0, "logs": "Review OK", "container_id": "c-2"},
+        {"exit_code": 0, "logs": "Pytest OK", "container_id": "c-3"}
+    ]
+
+    worker = ExecutorWorker(
+        repo=mock_repo,
+        sandbox_manager=mock_sandbox,
+        github_client=mock_github,
+        settings=settings
+    )
+
+    task = asyncio.create_task(worker.start())
+    await asyncio.sleep(0.05)
+    worker.stop()
+    await task
+
+    # complete_event should NOT be called
+    mock_repo.complete_event.assert_not_called()
+
+    # fail_event SHOULD be called
+    mock_repo.fail_event.assert_called_once()
+    fail_args = mock_repo.fail_event.call_args
+    assert "Falha na abertura de Pull Request" in fail_args.kwargs["error_message"]
+
+    # Audit log PR_FAILED should be recorded
+    audit_actions = [c.kwargs.get("action") for c in mock_repo.add_audit_log.call_args_list]
+    assert "PR_FAILED" in audit_actions
+
+
