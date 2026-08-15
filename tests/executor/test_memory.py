@@ -186,3 +186,32 @@ def test_sync_memlog_file_multiprocess_writes_with_file_lock(tmp_path: Path):
     for i in range(8):
         assert f"story-proc-{i}" in content, f"Entrada do processo {i} ausente no arquivo"
         assert content.count(f"## [2026-08-12T23:{i:02d}:00Z]") == 1
+
+
+def test_sync_memlog_file_with_code_review_metadata(tmp_path: Path):
+    mock_repo = MagicMock()
+    manager = AgentMemoryManager(repo=mock_repo)
+
+    summary = {
+        "timestamp": "2026-08-13T22:00:00Z",
+        "title": "Autonomous Dev and Review",
+        "status": "COMPLETED",
+        "actions": ["Coding with bmad-dev-story", "Internal review with bmad-code-review"],
+        "review_summary": {
+            "status": "APPROVED",
+            "findings_count": 2,
+            "patches_applied": 2,
+            "deferred_count": 0
+        },
+        "test_results": {"passed": 88, "failed": 0},
+        "decisions": "Code review passed with zero deferred work."
+    }
+
+    memlog_file = manager.sync_memlog_file(tmp_path, "3-1-workflow", summary)
+    content = memlog_file.read_text(encoding="utf-8")
+
+    assert "- **Status:** COMPLETED" in content
+    assert "- **Code Review Interno:** Status: APPROVED | Achados: 2 | Patches Aplicados: 2 | Diferidos: 0" in content
+    assert "- **Resultado dos Testes:** 88 passed, 0 failed" in content
+    assert "- **Aprendizados/Decisões:** Code review passed with zero deferred work." in content
+

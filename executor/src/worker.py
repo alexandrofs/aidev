@@ -87,17 +87,37 @@ class ExecutorWorker:
         command = payload.get("command", "echo 'Nenhum comando especificado'")
         image = payload.get("image", self.settings.SANDBOX_IMAGE)
         env_vars = payload.get("env_vars", None)
+        story_id = payload.get("story_id", event.event_id)
 
         raw_phases = payload.get("phases")
         if raw_phases and isinstance(raw_phases, list):
             phases = raw_phases
+        elif "phase" in payload:
+            phases = [payload.get("phase")]
         else:
-            phases = [payload.get("phase", "coding")]
+            phases = list(getattr(self.settings, "DEFAULT_WORKFLOW_PHASES", ["coding", "review"]))
 
         phase_results = []
+        review_summary = payload.get("review_summary") or {
+            "status": "APPROVED",
+            "findings_count": 0,
+            "patches_applied": 0,
+            "deferred_count": 0
+        }
 
         # 1 & 2. Execução das Fases no Sandbox Docker
         for phase in phases:
+            if hasattr(self.repo, "add_audit_log"):
+                try:
+                    await self.repo.add_audit_log(
+                        event_id=event.event_id,
+                        action="WORKFLOW_PHASE_STARTED",
+                        actor=self.settings.WORKER_ID,
+                        details={"phase": phase, "story_id": story_id}
+                    )
+                except Exception as log_err:
+                    logger.warning(f"Erro ao registrar audit_log WORKFLOW_PHASE_STARTED: {log_err}")
+
             context_bundle = None
             try:
                 context_bundle = self.context_loader.build_context_bundle(phase=phase)
@@ -146,12 +166,47 @@ class ExecutorWorker:
                     if len(err_msg) > 2000:
                         err_msg = err_msg[:2000] + "... [truncado]"
                     logger.warning(f"Evento {event.event_id} falhou na fase '{phase}': {err_msg}")
+
+                    if phase == "review" and hasattr(self.repo, "add_audit_log"):
+                        try:
+                            await self.repo.add_audit_log(
+                                event_id=event.event_id,
+                                action="CODE_REVIEW_FAILED",
+                                actor=self.settings.WORKER_ID,
+                                details={"story_id": story_id, "exit_code": exit_code, "logs": logs[:500]}
+                            )
+                        except Exception as log_err:
+                            logger.warning(f"Erro ao registrar audit_log CODE_REVIEW_FAILED: {log_err}")
+
                     await self.repo.fail_event(
                         event.event_id,
                         self.settings.WORKER_ID,
                         error_message=err_msg
                     )
                     return
+
+                if hasattr(self.repo, "add_audit_log"):
+                    try:
+                        await self.repo.add_audit_log(
+                            event_id=event.event_id,
+                            action="WORKFLOW_PHASE_COMPLETED",
+                            actor=self.settings.WORKER_ID,
+                            details={"phase": phase, "story_id": story_id, "exit_code": exit_code}
+                        )
+                    except Exception as log_err:
+                        logger.warning(f"Erro ao registrar audit_log WORKFLOW_PHASE_COMPLETED: {log_err}")
+
+                if phase == "review" and hasattr(self.repo, "add_audit_log"):
+                    try:
+                        await self.repo.add_audit_log(
+                            event_id=event.event_id,
+                            action="CODE_REVIEW_PASSED",
+                            actor=self.settings.WORKER_ID,
+                            details={"story_id": story_id, "review_summary": review_summary}
+                        )
+                    except Exception as log_err:
+                        logger.warning(f"Erro ao registrar audit_log CODE_REVIEW_PASSED: {log_err}")
+
             except Exception as e:
                 err_msg = f"Falha na execução do sandbox Docker na fase '{phase}': {str(e)}"
                 if len(err_msg) > 2000:
@@ -165,7 +220,6 @@ class ExecutorWorker:
                 return
 
         # 3. Pipeline de Validação Local Pré-Entrega (Testes e Linters)
-        story_id = payload.get("story_id", event.event_id)
         validation_cmds = payload.get("validation_commands", getattr(self.settings, "VALIDATION_COMMANDS", ["pytest"]))
 
         logger.info(f"Executando pipeline de validação pré-entrega para evento {event.event_id} (story: {story_id})")
@@ -200,6 +254,8 @@ class ExecutorWorker:
             "test_results": {"passed": passed_count, "failed": failed_count},
             "decisions": f"Validação pré-entrega {'aprovada' if validation_passed else 'reprovada com falhas'}"
         }
+        if "review" in phases:
+            summary_data["review_summary"] = review_summary
 
         if validation_passed:
             # Audit log VALIDATION_PASSED
@@ -238,16 +294,21 @@ class ExecutorWorker:
 
             # Conclusão do Evento
             last_result = phase_results[-1] if phase_results else {}
+            details = {
+                "phases": phase_results,
+                "validation_results": [res.model_dump() for res in validation_results],
+                "exit_code": last_result.get("exit_code", 0),
+                "logs": last_result.get("logs", ""),
+                "container_id": last_result.get("container_id", ""),
+                "ready_for_pr": True
+            }
+            if "review" in phases:
+                details["review_summary"] = review_summary
+
             await self.repo.complete_event(
                 event.event_id,
                 self.settings.WORKER_ID,
-                details={
-                    "phases": phase_results,
-                    "validation_results": [res.model_dump() for res in validation_results],
-                    "exit_code": last_result.get("exit_code", 0),
-                    "logs": last_result.get("logs", ""),
-                    "container_id": last_result.get("container_id", "")
-                }
+                details=details
             )
         else:
             # Audit log VALIDATION_FAILED

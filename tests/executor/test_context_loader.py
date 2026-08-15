@@ -13,9 +13,11 @@ def test_executor_settings_context_defaults():
     assert settings.SKILLS_DIR == ".agents/skills"
     assert settings.PROMPTS_DIR == "executor/prompts"
     assert settings.MANDATORY_PROMPTS == ["coding.md", "review.md"]
+    assert settings.DEFAULT_WORKFLOW_PHASES == ["coding", "review"]
     assert str(settings.resolved_mcp_config_path).endswith("mcp_config.json")
     assert str(settings.resolved_skills_dir).endswith(".agents/skills")
     assert str(settings.resolved_prompts_dir).endswith("executor/prompts")
+
 
 
 def test_exceptions_hierarchy():
@@ -99,5 +101,18 @@ def test_build_context_bundle_success():
     bundle = loader.build_context_bundle("coding")
     assert bundle["phase"] == "coding"
     assert "Coding Prompt Template" in bundle["prompt_template"]
+    assert "bmad-dev-story" in bundle["prompt_template"]
+    assert "Red-Green-Refactor" in bundle["prompt_template"]
     assert "mcp_config" in bundle
     assert "skills" in bundle
+
+
+def test_review_prompt_template_content():
+    loader = ContextLoader()
+    bundle = loader.build_context_bundle("review")
+    assert bundle["phase"] == "review"
+    assert "Review Prompt Template" in bundle["prompt_template"]
+    assert "bmad-code-review" in bundle["prompt_template"]
+    assert "Zero Deferred Work" in bundle["prompt_template"]
+    assert "NÃO abra Pull Request" in bundle["prompt_template"]
+

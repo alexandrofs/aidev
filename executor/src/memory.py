@@ -96,12 +96,25 @@ class AgentMemoryManager:
         if isinstance(decisions, list):
             decisions = "; ".join(str(d) for d in decisions)
 
+        # Metadados de Code Review (Story 3.1 AC: 4)
+        review_data = summary_data.get("review_summary")
+        review_line = ""
+        if isinstance(review_data, dict):
+            rev_status = review_data.get("status", "APPROVED")
+            patches = review_data.get("patches_applied", 0)
+            findings = review_data.get("findings_count", 0)
+            deferred = review_data.get("deferred_count", 0)
+            review_line = f"- **Code Review Interno:** Status: {rev_status} | Achados: {findings} | Patches Aplicados: {patches} | Diferidos: {deferred}\n"
+        elif "review_status" in summary_data:
+            review_line = f"- **Code Review Interno:** {summary_data.get('review_status')}\n"
+
         # Cabeçalho único da entrada — usado para verificar duplicata
         entry_header = f"## [{timestamp}] - Story {story_id}: {title}"
         entry_md = (
             f"{entry_header}\n"
             f"- **Status:** {status}\n"
             f"- **Ações Realizadas:** {actions}\n"
+            f"{review_line}"
             f"- **Resultado dos Testes:** {test_results}\n"
             f"- **Aprendizados/Decisões:** {decisions}\n\n"
         )
