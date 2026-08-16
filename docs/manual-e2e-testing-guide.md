@@ -16,7 +16,7 @@ O sistema foi concebido para ser **agnóstico de linguagem e framework**:
 
 ---
 
-## ⚡ 2. Pré-Requisitos
+## ⚡ 2. Pré-Requisitos e Exposição de Webhook
 
 Certifique-se de que os containers da infraestrutura local estejam em execução:
 
@@ -33,6 +33,19 @@ Os seguintes serviços devem estar com status saudável (`healthy` / `Up`):
 - `aidev-postgres` (PostgreSQL 16 na porta `5432`)
 - `aidev-api` (FastAPI na porta `8000`)
 - `aidev-executor` (Worker orquestrador de sandboxes)
+
+### Expondo o Webhook para a Internet (Túnel HTTPS)
+
+Para receber webhooks reais do GitHub em seu ambiente de desenvolvimento local, execute o script de túnel:
+
+```bash
+./scripts/start_tunnel.sh
+```
+
+O script detecta automaticamente `cloudflared` (padrão sem necessidade de login) ou `ngrok`, fornecendo uma URL pública HTTPS para cadastrar em seu repositório GitHub (*Settings -> Webhooks*):
+- **Payload URL**: `https://<dominio-do-tunnel>/webhooks/github`
+- **Content type**: `application/json`
+- **Secret**: O valor da sua variável `GITHUB_WEBHOOK_SECRET` do `.env`.
 
 ---
 
