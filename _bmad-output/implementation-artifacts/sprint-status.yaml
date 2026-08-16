@@ -52,6 +52,7 @@ development_status:
   1-1-schema-do-event-store-e-migracoes-em-postgresql-ai-dev-migrations: done
   1-2-endpoint-de-recepcao-validacao-e-ingestao-de-webhooks-ai-dev-api: done
   1-3-roteamento-e-consumo-idempotente-via-trava-de-banco-skip-locked: done
+  1-4-adicao-da-coluna-repository-no-event-store-e-resolucao-de-webhooks: ready-for-dev
   epic-1-retrospective: done
   epic-2: done
   2-1-worker-de-orquestracao-do-executor-e-sandbox-docker-efemero-ai-dev-executor: done

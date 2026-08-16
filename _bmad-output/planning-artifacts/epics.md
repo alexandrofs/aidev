@@ -138,6 +138,19 @@ So that eventos concorrentes ou duplicados sejam processados exatamente uma vez 
 **Then** a consulta deve utilizar `FOR UPDATE SKIP LOCKED` para selecionar e marcar a linha atomicamente com o status `PROCESSING`
 **And** tentativas de reprocessamento do mesmo `event_id` ou hash de payload idêntico devem ser identificadas e tratadas de forma idempotente sem colateral repetido.
 
+### Story 1.4: Adição da Coluna Repository no Event Store e Resolução de Webhooks
+
+As a sistema AIDEV,
+I want que a tabela de eventos do PostgreSQL possua uma coluna dedicada `repository` e que o endpoint de webhooks resolva o repositório alvo (inclusive consultando o GitHub GraphQL para eventos de Projects v2) antes de persistir o evento,
+So that todos os eventos no Event Store possuam um repositório alvo válido e garantido, viabilizando consumo multi-repo e eliminando falhas tardias no worker.
+
+**Acceptance Criteria:**
+
+**Given** um webhook recebido no endpoint `POST /webhooks/github`
+**When** a requisição for processada
+**Then** a API deve extrair o `repository` diretamente do payload ou via consulta GraphQL (`node(id: $content_node_id)`) para itens de Projects v2 (`Issue`/`PullRequest`), gravando na coluna `repository` da tabela `events` com migration Alembic
+**And** rejeitar eventos órfãos/DraftIssues sem repositório com HTTP 422 Unprocessable Entity.
+
 ---
 
 ## Epic 2: Orquestração de Execução e Sandbox Isolado do Agente (Autonomous Execution Sandbox)

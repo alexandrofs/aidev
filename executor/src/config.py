@@ -30,6 +30,15 @@ class ExecutorSettings(BaseSettings):
     VALIDATION_COMMANDS: list[str] = Field(default_factory=lambda: ["pytest"])
     MEMLOG_FILENAME: str = ".memlog.md"
 
+    # Configurações de execução autônoma com OpenCode
+    OPENCODE_RUN_COMMAND: str = "opencode run {prompt_path}"
+    OPENCODE_MODEL: Optional[str] = None
+    OPENCODE_API_KEY: Optional[str] = None
+
+    # Configurações de Git / Autor
+    GIT_AUTHOR_NAME: str = "AI Developer Agent"
+    GIT_AUTHOR_EMAIL: str = "aidev-agent@noreply.github.com"
+
     # Configurações de integração com GitHub (Story 3.2)
     GITHUB_TOKEN: Optional[str] = None
     GITHUB_REPOSITORY: Optional[str] = None

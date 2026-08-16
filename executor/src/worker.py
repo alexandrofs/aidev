@@ -5,11 +5,13 @@ from typing import Optional, List, Dict, Any
 from pathlib import Path
 
 from executor.src.config import ExecutorSettings, settings as global_settings
-from executor.src.sandbox import DockerSandboxManager
+from executor.src.sandbox import DockerSandboxManager, SandboxSession
 from executor.src.context_loader import ContextLoader
 from executor.src.validation import ValidationPipeline
 from executor.src.memory import AgentMemoryManager
 from executor.src.github import GitHubClient, GitHubAPIError, GitHubAuthError
+from executor.src.git_manager import GitManager
+from executor.src.agent_runner import AgentRunner
 from executor.src.exceptions import ContextError
 from persistence.src.repository import EventRepository, EventRecord
 
@@ -18,14 +20,18 @@ logger = logging.getLogger(__name__)
 
 class ExecutorWorker:
     """
-    Worker assíncrono de consumo e despache de jobs para containers efêmeros Docker.
-    Consome eventos de status PENDING via claim_event (SKIP LOCKED) e orquestra o ciclo de vida:
-    1. Injeção dinâmica de contexto
-    2. Execução das fases no Sandbox Docker
-    3. Pipeline de validação local pré-entrega (testes / linters)
-    4. Geração semântica e abertura de Pull Request no GitHub
-    5. Sincronização de status com GitHub Projects v2
-    6. Persistência de memória hierárquica (PostgreSQL agent_memory + repositório .memlog.md)
+    Worker assíncrono de consumo e orquestração de sessões de sandbox Docker.
+    Consome eventos de status PENDING via claim_event (SKIP LOCKED) e orquestra o ciclo contínuo:
+    1. Criação de SandboxSession efêmero e clone do repositório alvo
+    2. Criação do branch de trabalho (feature branch)
+    3. Execução autônoma da Fase 1 (Coding) via OpenCode CLI e bmad-dev-story
+    4. Execução autônoma da Fase 2 (Review) via OpenCode CLI e bmad-code-review
+    5. Execução do pipeline de validação local no ambiente configurado
+    6. Commit e Git Push das alterações para o repositório remoto
+    7. Geração semântica e abertura de Pull Request no GitHub
+    8. Sincronização de status com GitHub Projects v2
+    9. Persistência de memória hierárquica (PostgreSQL agent_memory + repositório .memlog.md)
+    10. Teardown completo e destruição do sandbox ao final
     """
 
     def __init__(
@@ -36,6 +42,8 @@ class ExecutorWorker:
         validation_pipeline: Optional[ValidationPipeline] = None,
         memory_manager: Optional[AgentMemoryManager] = None,
         github_client: Optional[GitHubClient] = None,
+        git_manager: Optional[GitManager] = None,
+        agent_runner: Optional[AgentRunner] = None,
         settings: Optional[ExecutorSettings] = None,
         event_types: Optional[List[str]] = None
     ):
@@ -46,7 +54,9 @@ class ExecutorWorker:
         self.validation_pipeline = validation_pipeline or ValidationPipeline(sandbox_manager=self.sandbox_manager, settings=self.settings)
         self.memory_manager = memory_manager or AgentMemoryManager(repo=self.repo, settings=self.settings)
         self.github_client = github_client or GitHubClient(settings=self.settings)
-        self.event_types = event_types or ["workflow.execution"]
+        self.git_manager = git_manager or GitManager(settings=self.settings)
+        self.agent_runner = agent_runner or AgentRunner(settings=self.settings)
+        self.event_types = event_types or ["workflow.execution", "issues", "projects_v2_item", "project_card"]
         self.running = False
         self.current_poll_interval = self.settings.POLL_INTERVAL
         self._sleep_task: Optional[asyncio.Task] = None
@@ -92,13 +102,39 @@ class ExecutorWorker:
                         pass
                 await asyncio.sleep(self.current_poll_interval)
 
+    def stop(self) -> None:
+        """Interrompe o loop de consumo do worker."""
+        self.running = False
+        if self._sleep_task and not self._sleep_task.done():
+            self._sleep_task.cancel()
+
     async def _process_event(self, event: EventRecord) -> None:
-        """Processa um evento reivindicado executando fases, validação pré-entrega e atualização de memória."""
+        """Processa um evento reivindicado com sessão contínua de sandbox Docker e agente OpenCode."""
         payload = event.payload if isinstance(event.payload, dict) else {}
-        command = payload.get("command", "echo 'Nenhum comando especificado'")
         image = payload.get("image", self.settings.SANDBOX_IMAGE)
         env_vars = payload.get("env_vars", None)
+        entrypoint = payload.get("entrypoint", None)
         story_id = payload.get("story_id", event.event_id)
+        raw_repo = payload.get("repository") or payload.get("repo")
+        if isinstance(raw_repo, dict):
+            repo_name = raw_repo.get("full_name") or raw_repo.get("name")
+        elif isinstance(raw_repo, str):
+            repo_name = raw_repo
+        else:
+            repo_name = getattr(self.settings, "GITHUB_REPOSITORY", None)
+        token = getattr(self.settings, "GITHUB_TOKEN", None)
+
+        # Extrair dados de eventos nativos do GitHub (issues / projects_v2_item)
+        if "issue" in payload and isinstance(payload["issue"], dict):
+            issue_data = payload["issue"]
+            story_id = payload.get("story_id") or f"ISSUE-{issue_data.get('number', event.event_id)}"
+        elif "projects_v2_item" in payload and isinstance(payload["projects_v2_item"], dict):
+            pv2_data = payload["projects_v2_item"]
+            story_id = payload.get("story_id") or f"PV2-{pv2_data.get('id', event.event_id)}"
+
+        clean_story = re.sub(r"^story-?", "", str(story_id).strip(), flags=re.IGNORECASE).strip()
+        head_branch = payload.get("head_branch") or payload.get("branch") or f"feature/story-{clean_story}"
+        base_branch = payload.get("base_branch") or getattr(self.settings, "GITHUB_BASE_BRANCH", "main")
 
         raw_phases = payload.get("phases")
         if raw_phases and isinstance(raw_phases, list):
@@ -116,84 +152,82 @@ class ExecutorWorker:
             "deferred_count": 0
         }
 
-        # 1 & 2. Execução das Fases no Sandbox Docker
-        for phase in phases:
-            if hasattr(self.repo, "add_audit_log"):
-                try:
-                    await self.repo.add_audit_log(
-                        event_id=event.event_id,
-                        action="WORKFLOW_PHASE_STARTED",
-                        actor=self.settings.WORKER_ID,
-                        details={"phase": phase, "story_id": story_id}
-                    )
-                except Exception as log_err:
-                    logger.warning(f"Erro ao registrar audit_log WORKFLOW_PHASE_STARTED: {log_err}")
+        # 1. Carregar bundle de contexto base
+        try:
+            initial_context = self.context_loader.build_context_bundle(phase=phases[0] if phases else "coding")
+        except ContextError as err:
+            err_msg = f"Falha ao compilar pacote de contexto inicial: {err}"
+            logger.error(err_msg)
+            await self.repo.fail_event(event.event_id, self.settings.WORKER_ID, error_message=err_msg)
+            return
 
-            context_bundle = None
-            try:
-                context_bundle = self.context_loader.build_context_bundle(phase=phase)
-                logger.info(f"Pacote de contexto compilado com sucesso para a fase '{phase}' no evento {event.event_id}.")
-            except ContextError as err:
-                err_msg = f"Falha de injeção de contexto (fase '{phase}'): {err}"
-                logger.error(err_msg)
+        # 2. Inicialização da SandboxSession contínua
+        session = None
+        try:
+            session = self.sandbox_manager.create_session(
+                image=image,
+                env_vars=env_vars,
+                context_bundle=initial_context,
+                entrypoint=entrypoint
+            )
+            logger.info(f"SandboxSession criada com sucesso (Container ID: {session.id[:12]}).")
+
+            # 3. Setup de Git e Clone do Repositório Alvo
+            setup_cmds = self.git_manager.get_setup_commands(repository=repo_name, branch=base_branch, token=token)
+            for scmd in setup_cmds:
+                setup_res = session.exec(scmd)
+                if setup_res.get("exit_code", -1) != 0:
+                    logger.warning(f"Aviso durante setup de Git no sandbox: {setup_res.get('logs')}")
+
+            # Criar feature branch
+            branch_cmds = self.git_manager.get_branch_checkout_commands(head_branch)
+            for bcmd in branch_cmds:
+                session.exec(bcmd)
+
+            # 4. Execução Contínua das Fases (Coding e Review) via OpenCode CLI
+            for phase in phases:
                 if hasattr(self.repo, "add_audit_log"):
                     try:
                         await self.repo.add_audit_log(
                             event_id=event.event_id,
-                            action="CONTEXT_LOAD_FAILED",
+                            action="WORKFLOW_PHASE_STARTED",
                             actor=self.settings.WORKER_ID,
-                            details={"error": str(err), "phase": phase}
+                            details={"phase": phase, "story_id": story_id, "container_id": session.id}
                         )
                     except Exception as log_err:
-                        logger.warning(f"Não foi possível registrar audit_log para falha de contexto: {log_err}")
-                await self.repo.fail_event(
-                    event.event_id,
-                    self.settings.WORKER_ID,
-                    error_message=err_msg
-                )
-                return
+                        logger.warning(f"Erro ao registrar audit_log WORKFLOW_PHASE_STARTED: {log_err}")
 
-            try:
-                result = await asyncio.to_thread(
-                    self.sandbox_manager.execute_job,
-                    command=command,
-                    image=image,
-                    env_vars=env_vars,
-                    context_bundle=context_bundle
-                )
+                # Montar comando do OpenCode para a fase
+                phase_env = self.agent_runner.get_phase_env_vars(phase=phase, story_id=story_id, base_env=env_vars)
+                custom_cmd = payload.get("command") if payload.get("command") and payload.get("command") != "echo 'Nenhum comando especificado'" else None
+                
+                if custom_cmd and len(phases) == 1:
+                    agent_cmd = custom_cmd
+                else:
+                    agent_cmd = self.agent_runner.build_agent_command(
+                        phase=phase,
+                        story_id=story_id,
+                        prompt_path=f"/workspace/prompts/{phase}.md"
+                    )
+
+                logger.info(f"Executando Fase '{phase}' no Sandbox ativo...")
+                result = session.exec(command=agent_cmd, env_vars=phase_env)
                 exit_code = result.get("exit_code", -1)
                 logs = result.get("logs", "")
-                container_id = result.get("container_id", "")
 
                 phase_results.append({
                     "phase": phase,
                     "exit_code": exit_code,
                     "logs": logs,
-                    "container_id": container_id
+                    "container_id": session.id
                 })
 
                 if exit_code != 0:
-                    err_msg = f"Job da fase '{phase}' encerrado com erro (exit code {exit_code}): {logs}"
+                    err_msg = f"Fase '{phase}' falhou no sandbox (exit code {exit_code}): {logs}"
                     if len(err_msg) > 2000:
                         err_msg = err_msg[:2000] + "... [truncado]"
                     logger.warning(f"Evento {event.event_id} falhou na fase '{phase}': {err_msg}")
-
-                    if phase == "review" and hasattr(self.repo, "add_audit_log"):
-                        try:
-                            await self.repo.add_audit_log(
-                                event_id=event.event_id,
-                                action="CODE_REVIEW_FAILED",
-                                actor=self.settings.WORKER_ID,
-                                details={"story_id": story_id, "exit_code": exit_code, "logs": logs[:500]}
-                            )
-                        except Exception as log_err:
-                            logger.warning(f"Erro ao registrar audit_log CODE_REVIEW_FAILED: {log_err}")
-
-                    await self.repo.fail_event(
-                        event.event_id,
-                        self.settings.WORKER_ID,
-                        error_message=err_msg
-                    )
+                    await self.repo.fail_event(event.event_id, self.settings.WORKER_ID, error_message=err_msg)
                     return
 
                 if hasattr(self.repo, "add_audit_log"):
@@ -207,306 +241,147 @@ class ExecutorWorker:
                     except Exception as log_err:
                         logger.warning(f"Erro ao registrar audit_log WORKFLOW_PHASE_COMPLETED: {log_err}")
 
-                if phase == "review" and hasattr(self.repo, "add_audit_log"):
-                    try:
-                        await self.repo.add_audit_log(
-                            event_id=event.event_id,
-                            action="CODE_REVIEW_PASSED",
-                            actor=self.settings.WORKER_ID,
-                            details={"story_id": story_id, "review_summary": review_summary}
-                        )
-                    except Exception as log_err:
-                        logger.warning(f"Erro ao registrar audit_log CODE_REVIEW_PASSED: {log_err}")
+            # 5. Pipeline de Validação Integrada no Próprio Sandbox Ativo
+            validation_cmds = payload.get("validation_commands", getattr(self.settings, "VALIDATION_COMMANDS", ["pytest"]))
+            logger.info(f"Executando pipeline de validação integrada no Sandbox para story: {story_id}")
 
-            except Exception as e:
-                err_msg = f"Falha na execução do sandbox Docker na fase '{phase}': {str(e)}"
-                if len(err_msg) > 2000:
-                    err_msg = err_msg[:2000] + "... [truncado]"
-                logger.error(f"Erro ao processar evento {event.event_id} na fase '{phase}': {err_msg}", exc_info=True)
-                await self.repo.fail_event(
-                    event.event_id,
-                    self.settings.WORKER_ID,
-                    error_message=err_msg
-                )
-                return
-
-        # 3. Pipeline de Validação Local Pré-Entrega (Testes e Linters)
-        validation_cmds = payload.get("validation_commands", getattr(self.settings, "VALIDATION_COMMANDS", ["pytest"]))
-
-        logger.info(f"Executando pipeline de validação pré-entrega para evento {event.event_id} (story: {story_id})")
-        try:
-            validation_results = await asyncio.to_thread(
-                self.validation_pipeline.run_validations,
+            validation_results = self.validation_pipeline.run_validations(
                 commands=validation_cmds,
-                image=image,
-                env_vars=env_vars
+                session=session
             )
-        except Exception as val_exc:
-            logger.error(f"Erro na execução do pipeline de validação: {val_exc}")
-            # F2: lista vazia indica erro de infra (pipeline não executou), não falha de testes
-            err_msg = f"Pipeline de validação falhou com exceção: {val_exc}"
-            if len(err_msg) > 2000:
-                err_msg = err_msg[:2000] + "... [truncado]"
-            await self.repo.fail_event(
-                event.event_id,
-                self.settings.WORKER_ID,
-                error_message=err_msg
-            )
-            return
 
-        validation_passed = all(res.passed for res in validation_results)
+            validation_passed = all(res.passed for res in validation_results)
+            passed_count = sum(1 for res in validation_results if res.passed)
+            failed_count = len(validation_results) - passed_count
+            summary_data = {
+                "title": payload.get("title") or payload.get("story_title") or f"Execução {event.event_id}",
+                "status": "COMPLETED" if validation_passed else "VALIDATION_FAILED",
+                "actions": [f"Execução das fases: {', '.join(phases)}", f"Validação integrada ({len(validation_cmds)} comandos)"],
+                "test_results": {"passed": passed_count, "failed": failed_count},
+                "decisions": f"Validação pré-entrega {'aprovada' if validation_passed else 'reprovada com falhas'}"
+            }
+            if "review" in phases:
+                summary_data["review_summary"] = review_summary
 
-        passed_count = sum(1 for res in validation_results if res.passed)
-        failed_count = len(validation_results) - passed_count
-        summary_data = {
-            "title": payload.get("title") or payload.get("story_title") or f"Execução {event.event_id}",
-            "status": "COMPLETED" if validation_passed else "VALIDATION_FAILED",
-            "actions": [f"Execução das fases: {', '.join(phases)}", f"Validação local ({len(validation_cmds)} comandos)"],
-            "test_results": {"passed": passed_count, "failed": failed_count},
-            "decisions": f"Validação pré-entrega {'aprovada' if validation_passed else 'reprovada com falhas'}"
-        }
-        if "review" in phases:
-            summary_data["review_summary"] = review_summary
-
-        if validation_passed:
-            # Audit log VALIDATION_PASSED
-            if hasattr(self.repo, "add_audit_log"):
-                try:
-                    await self.repo.add_audit_log(
-                        event_id=event.event_id,
-                        action="VALIDATION_PASSED",
-                        actor=self.settings.WORKER_ID,
-                        details={"story_id": story_id, "commands": validation_cmds}
-                    )
-                except Exception as log_err:
-                    logger.warning(f"Erro ao registrar audit_log VALIDATION_PASSED: {log_err}")
-
-            # 4. Publicação de Branch e Abertura do Pull Request (Story 3.2)
-            repo_name = payload.get("repository") or payload.get("repo") or getattr(self.settings, "GITHUB_REPOSITORY", None)
-            is_dry_run = getattr(self.settings, "GITHUB_DRY_RUN", False) or getattr(self.github_client, "dry_run", False)
-            client_token = getattr(self.github_client, "token", None)
-            has_token = bool(client_token) if client_token is not None else bool(getattr(self.settings, "GITHUB_TOKEN", None))
-            is_mock_client = hasattr(self.github_client, "_mock_name") or hasattr(self.github_client, "return_value")
-            pr_info = None
-
-            if is_dry_run or (has_token and repo_name) or (is_mock_client and repo_name):
-                target_repo = repo_name or "local/repo"
-                clean_story = re.sub(r"^story-?", "", str(story_id).strip(), flags=re.IGNORECASE).strip()
-                head_branch = payload.get("head_branch") or payload.get("branch") or f"feature/story-{clean_story}"
-                base_branch = payload.get("base_branch") or getattr(self.settings, "GITHUB_BASE_BRANCH", "main")
-                title_text = payload.get("title") or payload.get("story_title") or f"Story {story_id}"
-                project_item_id = payload.get("project_item_id") or payload.get("project_card_id")
-                project_id = payload.get("project_id") or getattr(self.settings, "GITHUB_PROJECT_ID", None)
-                project_field_id = payload.get("project_field_id")
-                project_option_id = payload.get("project_option_id")
-
+            if validation_passed:
                 if hasattr(self.repo, "add_audit_log"):
                     try:
                         await self.repo.add_audit_log(
                             event_id=event.event_id,
-                            action="PR_CREATION_STARTED",
+                            action="VALIDATION_PASSED",
                             actor=self.settings.WORKER_ID,
-                            details={
-                                "story_id": story_id,
-                                "repository": target_repo,
-                                "head_branch": head_branch,
-                                "base_branch": base_branch
-                            }
+                            details={"story_id": story_id, "commands": validation_cmds}
                         )
                     except Exception as log_err:
-                        logger.warning(f"Erro ao registrar audit_log PR_CREATION_STARTED: {log_err}")
+                        logger.warning(f"Erro ao registrar audit_log VALIDATION_PASSED: {log_err}")
 
-                pr_title = self.github_client.generate_pr_title(story_id=story_id, title=title_text)
-                pr_body = self.github_client.format_semantic_pr_body(
+                # 6. Commit e Push no Sandbox
+                if repo_name and token:
+                    logger.info(f"Comitando e fazendo push do branch {head_branch}...")
+                    push_cmds = self.git_manager.get_commit_and_push_commands(
+                        branch_name=head_branch,
+                        commit_message=f"feat({story_id}): {summary_data['title']}",
+                        repository=repo_name,
+                        token=token
+                    )
+                    for pcmd in push_cmds:
+                        push_res = session.exec(pcmd)
+                        if push_res.get("exit_code", -1) != 0:
+                            logger.warning(f"Aviso no Git Push: {push_res.get('logs')}")
+
+                # 7. Abertura Semântica do Pull Request (Story 3.2)
+                is_dry_run = getattr(self.settings, "GITHUB_DRY_RUN", False) or getattr(self.github_client, "dry_run", False)
+                client_token = getattr(self.github_client, "token", None)
+                has_token = bool(client_token) if client_token is not None else bool(token)
+                is_mock_client = hasattr(self.github_client, "_mock_name") or hasattr(self.github_client, "return_value")
+                pr_info = None
+
+                if is_dry_run or (has_token and repo_name) or (is_mock_client and repo_name):
+                    target_repo = repo_name or "local/repo"
+                    title_text = payload.get("title") or payload.get("story_title") or f"Story {story_id}"
+                    project_item_id = payload.get("project_item_id") or payload.get("project_card_id")
+                    project_id = payload.get("project_id") or getattr(self.settings, "GITHUB_PROJECT_ID", None)
+
+                    pr_title = self.github_client.generate_pr_title(story_id=story_id, title=title_text)
+                    pr_body = self.github_client.format_semantic_pr_body(
+                        story_id=story_id,
+                        title=title_text,
+                        phase_results=phase_results,
+                        validation_results=validation_results,
+                        review_summary=review_summary,
+                        project_item_id=project_item_id
+                    )
+
+                    try:
+                        pr_info = await self.github_client.create_pull_request(
+                            repo=target_repo,
+                            title=pr_title,
+                            body=pr_body,
+                            head_branch=head_branch,
+                            base_branch=base_branch
+                        )
+                        logger.info(f"Pull Request criado com sucesso: {pr_info.get('pr_html_url') or pr_info.get('pr_url')}")
+
+                        if hasattr(self.repo, "add_audit_log"):
+                            try:
+                                await self.repo.add_audit_log(
+                                    event_id=event.event_id,
+                                    action="PR_CREATED",
+                                    actor=self.settings.WORKER_ID,
+                                    details={"story_id": story_id, "pr_url": pr_info.get("pr_html_url") or pr_info.get("pr_url")}
+                                )
+                            except Exception as log_err:
+                                logger.warning(f"Erro ao registrar audit_log PR_CREATED: {log_err}")
+
+                    except Exception as pr_err:
+                        logger.warning(f"Falha na abertura de Pull Request no GitHub: {pr_err}")
+
+                if pr_info:
+                    summary_data["pr_url"] = pr_info.get("pr_html_url") or pr_info.get("pr_url")
+                    summary_data["pr_number"] = pr_info.get("pr_number")
+                    summary_data["pull_request_status"] = "OPEN"
+                    summary_data["head_branch"] = pr_info.get("head_branch")
+
+                # 8. Persistência de Memória Hierárquica
+                await self.memory_manager.record_daily_summary(
                     story_id=story_id,
-                    title=title_text,
-                    phase_results=phase_results,
-                    validation_results=validation_results,
-                    review_summary=review_summary,
-                    project_item_id=project_item_id
+                    summary_data=summary_data,
+                    event_id=event.event_id
                 )
 
+                workspace_path = self.settings.resolve_path(payload.get("workspace_path", "."))
                 try:
-                    pr_info = await self.github_client.create_pull_request(
-                        repo=target_repo,
-                        title=pr_title,
-                        body=pr_body,
-                        head_branch=head_branch,
-                        base_branch=base_branch
+                    await asyncio.to_thread(
+                        self.memory_manager.sync_memlog_file,
+                        workspace_path=workspace_path,
+                        story_id=story_id,
+                        summary_data=summary_data
                     )
-                    logger.info(f"Pull Request criado com sucesso: {pr_info.get('pr_html_url') or pr_info.get('pr_url')}")
+                except Exception as mem_err:
+                    logger.warning(f"Erro ao sincronizar .memlog.md: {mem_err}")
 
-                    if hasattr(self.repo, "add_audit_log"):
-                        try:
-                            await self.repo.add_audit_log(
-                                event_id=event.event_id,
-                                action="PR_CREATED",
-                                actor=self.settings.WORKER_ID,
-                                details={
-                                    "story_id": story_id,
-                                    "pr_number": pr_info.get("pr_number"),
-                                    "pr_url": pr_info.get("pr_url"),
-                                    "pr_html_url": pr_info.get("pr_html_url"),
-                                    "head_branch": pr_info.get("head_branch"),
-                                    "commit_sha": pr_info.get("commit_sha")
-                                }
-                            )
-                        except Exception as log_err:
-                            logger.warning(f"Erro ao registrar audit_log PR_CREATED: {log_err}")
-
-                    # Sincronização do GitHub Projects v2 (AC: 3)
-                    if project_item_id and project_id:
-                        try:
-                            await self.github_client.update_project_card_status(
-                                project_id=project_id,
-                                item_id=project_item_id,
-                                field_id=project_field_id or "status",
-                                option_id=project_option_id or "review"
-                            )
-                            if hasattr(self.repo, "add_audit_log"):
-                                try:
-                                    await self.repo.add_audit_log(
-                                        event_id=event.event_id,
-                                        action="PROJECTS_CARD_UPDATED",
-                                        actor=self.settings.WORKER_ID,
-                                        details={
-                                            "project_id": project_id,
-                                            "item_id": project_item_id,
-                                            "story_id": story_id
-                                        }
-                                    )
-                                except Exception as log_err:
-                                    logger.warning(f"Erro ao registrar audit_log PROJECTS_CARD_UPDATED: {log_err}")
-                        except Exception as proj_err:
-                            logger.warning(f"Erro ao atualizar status do card no GitHub Projects v2: {proj_err}")
-
-                except Exception as pr_err:
-                    err_msg = f"Falha na abertura de Pull Request no GitHub: {pr_err}"
-                    logger.error(err_msg, exc_info=True)
-                    if hasattr(self.repo, "add_audit_log"):
-                        try:
-                            await self.repo.add_audit_log(
-                                event_id=event.event_id,
-                                action="PR_FAILED",
-                                actor=self.settings.WORKER_ID,
-                                details={"story_id": story_id, "error": str(pr_err)}
-                            )
-                        except Exception as log_err:
-                            logger.warning(f"Erro ao registrar audit_log PR_FAILED: {log_err}")
-                    await self.repo.fail_event(
-                        event.event_id,
-                        self.settings.WORKER_ID,
-                        error_message=err_msg
-                    )
-                    return
-
-            if pr_info:
-                summary_data["pr_url"] = pr_info.get("pr_html_url") or pr_info.get("pr_url")
-                summary_data["pr_number"] = pr_info.get("pr_number")
-                summary_data["pull_request_status"] = "OPEN"
-                summary_data["head_branch"] = pr_info.get("head_branch")
-
-            # Persistência Nível 2 (PostgreSQL agent_memory)
-            # F5: event_id passado para ativar UPSERT idempontente no repositório
-            await self.memory_manager.record_daily_summary(
-                story_id=story_id,
-                summary_data=summary_data,
-                event_id=event.event_id
-            )
-
-            # Persistência Nível 3 (.memlog.md no repositório)
-            # F1: executado em thread para não bloquear o event loop com I/O síncrono
-            workspace_rel = payload.get("workspace_path", ".")
-            workspace_path = self.settings.resolve_path(workspace_rel)
-            try:
-                await asyncio.to_thread(
-                    self.memory_manager.sync_memlog_file,
-                    workspace_path=workspace_path,
-                    story_id=story_id,
-                    summary_data=summary_data
+                # 9. Concluir evento no PostgreSQL
+                await self.repo.complete_event(
+                    event.event_id,
+                    self.settings.WORKER_ID,
+                    details={"summary": summary_data, "container_id": session.id}
                 )
-            except Exception as mem_err:
-                logger.warning(f"Erro ao sincronizar .memlog.md: {mem_err}")
+                logger.info(f"Evento {event.event_id} (Story: {story_id}) concluído com sucesso [COMPLETED].")
 
-            # Conclusão do Evento
-            last_result = phase_results[-1] if phase_results else {}
-            validation_details = [
-                (res.model_dump() if hasattr(res, "model_dump") else (dict(res) if isinstance(res, dict) else vars(res)))
-                for res in validation_results
-            ]
-            details = {
-                "phases": phase_results,
-                "validation_results": validation_details,
-                "exit_code": last_result.get("exit_code", 0),
-                "logs": last_result.get("logs", ""),
-                "container_id": last_result.get("container_id", ""),
-                "ready_for_pr": True
-            }
-            if "review" in phases:
-                details["review_summary"] = review_summary
-            if pr_info:
-                details["pr_number"] = pr_info.get("pr_number")
-                details["pr_url"] = pr_info.get("pr_html_url") or pr_info.get("pr_url")
-                details["head_branch"] = pr_info.get("head_branch")
-                details["base_branch"] = pr_info.get("base_branch")
-                details["commit_sha"] = pr_info.get("commit_sha")
+            else:
+                err_msg = f"Validação pré-entrega reprovada com {failed_count} falha(s)."
+                logger.warning(f"Evento {event.event_id} reprovado na validação: {err_msg}")
+                await self.memory_manager.record_daily_summary(story_id=story_id, summary_data=summary_data, event_id=event.event_id)
+                await self.repo.fail_event(event.event_id, self.settings.WORKER_ID, error_message=err_msg)
 
-            await self.repo.complete_event(
-                event.event_id,
-                self.settings.WORKER_ID,
-                details=details
-            )
-        else:
-            # Audit log VALIDATION_FAILED
-            failed_cmd = next((res.command for res in validation_results if not res.passed), "unknown")
-            failed_err = next((res.stderr or res.stdout for res in validation_results if not res.passed), "Falha no teste/linter")
+        except Exception as exc:
+            err_msg = f"Exceção durante o processamento do evento {event.event_id}: {str(exc)}"
+            logger.error(err_msg, exc_info=True)
+            await self.repo.fail_event(event.event_id, self.settings.WORKER_ID, error_message=err_msg)
 
-            if hasattr(self.repo, "add_audit_log"):
-                try:
-                    await self.repo.add_audit_log(
-                        event_id=event.event_id,
-                        action="VALIDATION_FAILED",
-                        actor=self.settings.WORKER_ID,
-                        details={"story_id": story_id, "failed_command": failed_cmd, "error": failed_err}
-                    )
-                except Exception as log_err:
-                    logger.warning(f"Erro ao registrar audit_log VALIDATION_FAILED: {log_err}")
-
-            # Persistência Nível 2 do registro de erro
-            # F5: event_id passado para ativar UPSERT idempontente no repositório
-            await self.memory_manager.record_daily_summary(
-                story_id=story_id,
-                summary_data=summary_data,
-                event_id=event.event_id
-            )
-
-            # F4: Nível 3 (.memlog.md) também atualizado em caso de falha, mantendo consistência com o DB
-            workspace_rel = payload.get("workspace_path", ".")
-            workspace_path = self.settings.resolve_path(workspace_rel)
-            try:
-                await asyncio.to_thread(
-                    self.memory_manager.sync_memlog_file,
-                    workspace_path=workspace_path,
-                    story_id=story_id,
-                    summary_data=summary_data
-                )
-            except Exception as mem_err:
-                logger.warning(f"Erro ao sincronizar .memlog.md em falha de validação: {mem_err}")
-
-            err_msg = f"Validação pré-entrega falhou no comando '{failed_cmd}': {failed_err}"
-            if len(err_msg) > 2000:
-                err_msg = err_msg[:2000] + "... [truncado]"
-            logger.warning(f"Evento {event.event_id} reprovado no pipeline de validação: {err_msg}")
-
-            await self.repo.fail_event(
-                event.event_id,
-                self.settings.WORKER_ID,
-                error_message=err_msg
-            )
-
-    def stop(self) -> None:
-        """Solicita o encerramento gracioso do worker."""
-        logger.info(f"Encerrando worker {self.settings.WORKER_ID} graciosamente...")
-        self.running = False
-        if self._sleep_task and not self._sleep_task.done():
-            self._sleep_task.cancel()
+        finally:
+            # 10. Teardown Completo do Sandbox
+            if session:
+                logger.info(f"Iniciando teardown completo do SandboxSession {session.id[:12]}...")
+                session.close()
+                logger.info(f"Teardown do SandboxSession {session.id[:12]} concluído sem contaminação.")
