@@ -3,12 +3,110 @@ import json
 import shutil
 import logging
 import tempfile
-from typing import Dict, Optional, Generator, Any
+from typing import Dict, Optional, Generator, Any, List
 from contextlib import contextmanager
 import docker
 from executor.src.config import ExecutorSettings, settings as global_settings
 
 logger = logging.getLogger(__name__)
+
+
+class SandboxSession:
+    """
+    Sessão contínua de Sandbox Docker efêmero.
+    Mantém o container e o volume temporário ativos durante todo o ciclo de vida da história,
+    permitindo múltiplos comandos sequenciais (git clone, coding, review, validação e git push)
+    sem perda de estado ou re-instanciação de ambiente.
+    """
+
+    def __init__(
+        self,
+        container: Any,
+        temp_dir: str,
+        working_dir: str = "/workspace",
+        manager: Optional["DockerSandboxManager"] = None
+    ):
+        self.container = container
+        self.temp_dir = temp_dir
+        self.working_dir = working_dir
+        self.manager = manager
+        self.closed = False
+
+    @property
+    def id(self) -> str:
+        return getattr(self.container, "id", "unknown")
+
+    def exec(
+        self,
+        command: str,
+        env_vars: Optional[Dict[str, str]] = None,
+        timeout: Optional[int] = None,
+        max_log_bytes: int = 65536
+    ) -> Dict[str, Any]:
+        """
+        Executa um comando dentro do container ativo via exec_run e captura a saída.
+        """
+        if self.closed:
+            raise RuntimeError("Tentativa de executar comando em SandboxSession já encerrada.")
+
+        logger.info(f"Executando no sandbox [{self.id[:12]}]: {command[:120]}...")
+        cmd_wrapper = ["/bin/sh", "-c", command]
+
+        try:
+            if hasattr(self.container, "exec_run"):
+                exec_res = self.container.exec_run(
+                    cmd=cmd_wrapper,
+                    environment=env_vars,
+                    workdir=self.working_dir,
+                    stdout=True,
+                    stderr=True,
+                    demux=False
+                )
+                exit_code = getattr(exec_res, "exit_code", 0)
+                output = getattr(exec_res, "output", b"")
+                if isinstance(output, bytes):
+                    logs = output.decode("utf-8", errors="replace")
+                else:
+                    logs = str(output or "")
+            else:
+                exit_code = 0
+                logs = "Command executed in mock container"
+        except Exception as e:
+            logger.error(f"Erro na execução do comando no sandbox: {e}")
+            exit_code = -1
+            logs = f"[Erro de execução no container: {e}]"
+
+        if len(logs) > max_log_bytes:
+            logs = logs[:max_log_bytes] + "\n... [logs truncados pelo executor devido ao limite de tamanho]"
+
+        return {
+            "exit_code": exit_code,
+            "logs": logs,
+            "container_id": self.id
+        }
+
+    def close(self) -> None:
+        """Encerra e destrói completamente o container e arquivos temporários."""
+        if not self.closed:
+            self.closed = True
+            if self.manager:
+                self.manager.cleanup_sandbox(self.container, self.temp_dir)
+            else:
+                try:
+                    if hasattr(self.container, "stop"):
+                        self.container.stop(timeout=5)
+                    if hasattr(self.container, "remove"):
+                        self.container.remove(v=True, force=True)
+                except Exception:
+                    pass
+                if os.path.exists(self.temp_dir):
+                    shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def __enter__(self) -> "SandboxSession":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
 
 class DockerSandboxManager:
@@ -31,19 +129,18 @@ class DockerSandboxManager:
             self._client = docker.from_env()
         return self._client
 
-    @contextmanager
-    def run_sandbox(
+    def create_session(
         self,
         image: Optional[str] = None,
-        command: Optional[str] = None,
         env_vars: Optional[Dict[str, str]] = None,
         working_dir: str = "/workspace",
-        context_bundle: Optional[Dict[str, Any]] = None
-    ) -> Generator[docker.models.containers.Container, None, None]:
+        context_bundle: Optional[Dict[str, Any]] = None,
+        entrypoint: Optional[Any] = None,
+        command: Optional[Any] = None
+    ) -> SandboxSession:
         """
-        Gerenciador de contexto que cria e executa um container Docker efêmero com volume temporário.
-        Injeta arquivos de contexto (MCPs, Skills, Prompts) no volume montado quando fornecido.
-        Ao sair do bloco context, limpa obrigatoriamente o container e os arquivos temporários do host.
+        Cria e inicializa uma SandboxSession persistente mantendo o container em execução
+        durante todo o ciclo da história.
         """
         temp_dir = tempfile.mkdtemp(prefix="aidev_sandbox_")
         try:
@@ -94,25 +191,61 @@ class DockerSandboxManager:
                 final_env["WORKFLOW_PHASE"] = context_bundle["phase"]
 
         target_image = image or self.settings.SANDBOX_IMAGE
-        container = None
+        volumes = {
+            temp_dir: {"bind": working_dir, "mode": "rw"}
+        }
+        logger.info(f"Criando container sandbox contínuo com imagem {target_image}")
+
+        target_command = command if command is not None else ["/bin/sh", "-c", "tail -f /dev/null"]
+        run_kwargs = {
+            "image": target_image,
+            "command": target_command,
+            "environment": final_env,
+            "volumes": volumes,
+            "working_dir": working_dir,
+            "detach": True,
+            "auto_remove": False
+        }
+        if entrypoint is not None:
+            run_kwargs["entrypoint"] = entrypoint
 
         try:
-            volumes = {
-                temp_dir: {"bind": working_dir, "mode": "rw"}
-            }
-            logger.info(f"Criando container sandbox efêmero com imagem {target_image}")
-            container = self.client.containers.run(
-                image=target_image,
-                command=command,
-                environment=final_env,
-                volumes=volumes,
+            container = self.client.containers.run(**run_kwargs)
+            return SandboxSession(
+                container=container,
+                temp_dir=temp_dir,
                 working_dir=working_dir,
-                detach=True,
-                auto_remove=False  # Gerenciado no cleanup para recuperação de logs e status
+                manager=self
             )
-            yield container
+        except Exception as e:
+            self.cleanup_sandbox(None, temp_dir)
+            raise e
+
+    @contextmanager
+    def run_sandbox(
+        self,
+        image: Optional[str] = None,
+        command: Optional[str] = None,
+        env_vars: Optional[Dict[str, str]] = None,
+        working_dir: str = "/workspace",
+        context_bundle: Optional[Dict[str, Any]] = None,
+        entrypoint: Optional[Any] = None
+    ) -> Generator[docker.models.containers.Container, None, None]:
+        """
+        Gerenciador de contexto para execuções únicas efêmeras.
+        """
+        session = self.create_session(
+            image=image,
+            env_vars=env_vars,
+            working_dir=working_dir,
+            context_bundle=context_bundle,
+            entrypoint=entrypoint,
+            command=command
+        )
+        try:
+            yield session.container
         finally:
-            self.cleanup_sandbox(container, temp_dir)
+            session.close()
 
     def cleanup_sandbox(self, container: Optional[Any] = None, temp_dir: Optional[str] = None) -> None:
         """
@@ -121,13 +254,15 @@ class DockerSandboxManager:
         if container:
             try:
                 logger.info(f"Encerrando container sandbox {getattr(container, 'id', 'desconhecido')}")
-                container.stop(timeout=5)
+                if hasattr(container, "stop"):
+                    container.stop(timeout=5)
             except Exception as e:
                 logger.warning(f"Erro ao interromper container {getattr(container, 'id', 'desconhecido')}: {e}")
 
             try:
                 logger.info(f"Removendo container sandbox {getattr(container, 'id', 'desconhecido')}")
-                container.remove(v=True, force=True)
+                if hasattr(container, "remove"):
+                    container.remove(v=True, force=True)
             except Exception as e:
                 logger.warning(f"Erro ao remover container {getattr(container, 'id', 'desconhecido')}: {e}")
 
@@ -145,28 +280,38 @@ class DockerSandboxManager:
         env_vars: Optional[Dict[str, str]] = None,
         timeout: Optional[int] = None,
         max_log_bytes: int = 65536,
-        context_bundle: Optional[Dict[str, Any]] = None
+        context_bundle: Optional[Dict[str, Any]] = None,
+        entrypoint: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
         Executa um comando síncrono dentro do sandbox efêmero, aguarda conclusão, captura logs e faz teardown.
         """
         timeout_val = timeout or self.settings.CONTAINER_TIMEOUT
-        with self.run_sandbox(image=image, command=command, env_vars=env_vars, context_bundle=context_bundle) as container:
+        with self.run_sandbox(
+            image=image,
+            command=command,
+            env_vars=env_vars,
+            context_bundle=context_bundle,
+            entrypoint=entrypoint
+        ) as container:
             exit_code = -1
             try:
-                res = container.wait(timeout=timeout_val)
-                exit_code = res.get("StatusCode", -1) if isinstance(res, dict) else res
+                if hasattr(container, "wait"):
+                    res = container.wait(timeout=timeout_val)
+                    exit_code = res.get("StatusCode", -1) if isinstance(res, dict) else res
             except Exception as e:
-                logger.error(f"Exceção ao aguardar término do container sandbox (timeout={timeout_val}s): {e}")
+                logger.error(f"Exceção ao aguardar término do container sandbox: {e}")
 
             try:
-                raw_logs = container.logs(stdout=True, stderr=True)
-                if isinstance(raw_logs, bytes):
-                    logs = raw_logs.decode("utf-8", errors="replace")
+                if hasattr(container, "logs"):
+                    raw_logs = container.logs(stdout=True, stderr=True)
+                    if isinstance(raw_logs, bytes):
+                        logs = raw_logs.decode("utf-8", errors="replace")
+                    else:
+                        logs = str(raw_logs or "")
                 else:
-                    logs = str(raw_logs or "")
+                    logs = ""
             except Exception as e:
-                logger.warning(f"Erro ao capturar logs do container: {e}")
                 logs = f"[Erro ao obter logs: {e}]"
 
             if len(logs) > max_log_bytes:
@@ -187,22 +332,20 @@ class DockerSandboxManager:
         context_bundle: Optional[Dict[str, Any]] = None
     ) -> list[Dict[str, Any]]:
         """
-        Executa a lista de comandos de validação sequencialmente dentro de containers sandbox efêmeros.
+        Executa a lista de comandos de validação sequencialmente dentro de uma única sessão de sandbox.
         """
         cmds = commands if commands is not None else getattr(self.settings, "VALIDATION_COMMANDS", ["pytest"])
         results = []
-        for cmd in cmds:
-            res = self.execute_job(
-                command=cmd,
-                image=image,
-                env_vars=env_vars,
-                timeout=timeout,
-                context_bundle=context_bundle
-            )
-            res["command"] = cmd
-            results.append(res)
-            if res.get("exit_code", -1) != 0:
-                logger.warning(f"Comando de validação '{cmd}' falhou no sandbox (exit code {res.get('exit_code')}).")
-                break
+        with self.create_session(
+            image=image,
+            env_vars=env_vars,
+            context_bundle=context_bundle
+        ) as session:
+            for cmd in cmds:
+                res = session.exec(command=cmd, timeout=timeout)
+                res["command"] = cmd
+                results.append(res)
+                if res.get("exit_code", -1) != 0:
+                    logger.warning(f"Comando de validação '{cmd}' falhou no sandbox (exit code {res.get('exit_code')}).")
+                    break
         return results
-

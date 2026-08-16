@@ -55,8 +55,17 @@ def migrated_db(postgres_url):
     engine = create_engine(postgres_url)
     yield engine
     
-    # Clean up (downgrade base)
-    command.downgrade(alembic_cfg, "base")
+    # Clean up test records and ensure database remains in head state for dev runtime
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("DELETE FROM audit_logs WHERE event_id LIKE 'evt_test%';"))
+            conn.execute(text("DELETE FROM agent_memory WHERE story_id LIKE 'story_%';"))
+            conn.execute(text("DELETE FROM events WHERE event_id LIKE 'evt_%';"))
+            conn.commit()
+    except Exception:
+        pass
+    
+    command.upgrade(alembic_cfg, "head")
     engine.dispose()
 
 
