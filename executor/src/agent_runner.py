@@ -67,10 +67,12 @@ fi
         env["NON_INTERACTIVE"] = "1"
         env["CI"] = "true"
 
-        if self.settings.OPENCODE_API_KEY:
-            env["OPENCODE_API_KEY"] = self.settings.OPENCODE_API_KEY
-            env["ANTHROPIC_API_KEY"] = self.settings.OPENCODE_API_KEY
-            env["GEMINI_API_KEY"] = self.settings.OPENCODE_API_KEY
-            env["OPENAI_API_KEY"] = self.settings.OPENCODE_API_KEY
+        api_key = getattr(self.settings, "OPENROUTER_API_KEY", None) or self.settings.OPENCODE_API_KEY
+        if api_key:
+            env["OPENROUTER_API_KEY"] = api_key
+            env["OPENCODE_API_KEY"] = api_key
+            env["ANTHROPIC_API_KEY"] = api_key
+            env["GEMINI_API_KEY"] = api_key
+            env["OPENAI_API_KEY"] = api_key
 
         return env

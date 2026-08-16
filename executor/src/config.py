@@ -34,6 +34,7 @@ class ExecutorSettings(BaseSettings):
     OPENCODE_RUN_COMMAND: str = "opencode run {prompt_path}"
     OPENCODE_MODEL: Optional[str] = None
     OPENCODE_API_KEY: Optional[str] = None
+    OPENROUTER_API_KEY: Optional[str] = None
 
     # Configurações de Git / Autor
     GIT_AUTHOR_NAME: str = "AI Developer Agent"

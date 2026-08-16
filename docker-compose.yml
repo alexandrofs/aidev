@@ -64,6 +64,7 @@ services:
       GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:-}
       SANDBOX_IMAGE: ${SANDBOX_IMAGE:-python:3.12-slim}
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENCODE_MODEL: ${OPENCODE_MODEL:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

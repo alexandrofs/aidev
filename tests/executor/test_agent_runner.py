@@ -17,7 +17,7 @@ def test_agent_runner_command_generation():
 
 
 def test_agent_runner_env_vars():
-    settings = ExecutorSettings(OPENCODE_API_KEY="sk-test-key-123")
+    settings = ExecutorSettings(OPENCODE_API_KEY="sk-test-key-123", _env_file=None)
     runner = AgentRunner(settings=settings)
 
     env = runner.get_phase_env_vars(phase="review", story_id="STORY-2", base_env={"CUSTOM": "VAL"})
@@ -25,5 +25,15 @@ def test_agent_runner_env_vars():
     assert env["STORY_ID"] == "STORY-2"
     assert env["NON_INTERACTIVE"] == "1"
     assert env["OPENCODE_API_KEY"] == "sk-test-key-123"
+    assert env["OPENROUTER_API_KEY"] == "sk-test-key-123"
     assert env["ANTHROPIC_API_KEY"] == "sk-test-key-123"
     assert env["CUSTOM"] == "VAL"
+
+
+def test_agent_runner_openrouter_api_key_env():
+    settings = ExecutorSettings(OPENROUTER_API_KEY="sk-or-v1-abc", _env_file=None)
+    runner = AgentRunner(settings=settings)
+
+    env = runner.get_phase_env_vars(phase="coding", story_id="STORY-3")
+    assert env["OPENROUTER_API_KEY"] == "sk-or-v1-abc"
+    assert env["OPENCODE_API_KEY"] == "sk-or-v1-abc"

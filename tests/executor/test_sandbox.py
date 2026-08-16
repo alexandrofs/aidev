@@ -9,7 +9,7 @@ from executor.src.sandbox import DockerSandboxManager
 
 
 def test_executor_settings_defaults():
-    settings = ExecutorSettings()
+    settings = ExecutorSettings(_env_file=None)
     assert settings.SANDBOX_IMAGE == "python:3.12-slim"
     assert settings.POLL_INTERVAL == 2.0
     assert settings.CONTAINER_TIMEOUT == 300
