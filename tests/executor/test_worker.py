@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from executor.src.config import ExecutorSettings
-from executor.src.worker import ExecutorWorker
+from executor.src.worker import ExecutorWorker, extract_story_id_from_issue
 from executor.src.sandbox import DockerSandboxManager, SandboxSession
 from executor.src.validation import ValidationResult
 from executor.src.exceptions import PromptTemplateNotFoundError
@@ -508,4 +508,142 @@ validation:
     assert cfg["version"] == "1"
     assert cfg["github"]["project_id"] == "PVT_kwDO_TARGET"
     assert cfg["validation"]["commands"] == ["mvn test"]
+
+
+def test_extract_story_id_from_issue():
+    # 1. Padrão "Story Key: 5-2-time-to-goal-motivational-clock"
+    issue_1 = {
+        "number": 42,
+        "body": "Por favor implementar esta funcionalidade.\n\nStory Key: 5-2-time-to-goal-motivational-clock\n\nDetalhes..."
+    }
+    assert extract_story_id_from_issue(issue_1, "fallback-1") == "5-2-time-to-goal-motivational-clock"
+
+    # 2. Padrão "Story: 1-4-adicao-coluna-repository" com ponto final no fim
+    issue_2 = {
+        "id": 1001,
+        "body": "Story: 1-4-adicao-coluna-repository.\nMais texto"
+    }
+    assert extract_story_id_from_issue(issue_2, "fallback-2") == "1-4-adicao-coluna-repository"
+
+    # 3. Fallback sem Story Key no body -> prioriza issue.number
+    issue_3 = {"id": 88, "number": 12, "body": "Issue sem chave de história"}
+    assert extract_story_id_from_issue(issue_3, "fallback-3") == "issue-12"
+
+    # 4. Fallback apenas com id
+    issue_4 = {"id": 88, "body": "Apenas ID"}
+    assert extract_story_id_from_issue(issue_4, "fallback-4") == "issue-88"
+
+    # 5. Fallback apenas com number
+    issue_5 = {"number": 99, "body": "Apenas número"}
+    assert extract_story_id_from_issue(issue_5, "fallback-5") == "issue-99"
+
+
+@pytest.mark.asyncio
+async def test_worker_issue_story_key_extraction_and_feature_branch(mock_repo, mock_sandbox, mock_session, settings):
+    """[AC 6, 7] Worker extrai Story Key do body e cria branch feature/<codigo_historia>."""
+    event = EventRecord(
+        id="12",
+        event_id="evt-issue-story-key",
+        event_type="issues",
+        status="PROCESSING",
+        repository="org/custom-repo",
+        payload={
+            "action": "labeled",
+            "issue": {
+                "number": 55,
+                "body": "Implementar timer motivational.\nStory Key: 5-2-time-to-goal-motivational-clock"
+            }
+        }
+    )
+    mock_repo.claim_event.side_effect = [event, None]
+
+    worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
+
+    with patch.object(worker.git_manager, "get_branch_checkout_commands", wraps=worker.git_manager.get_branch_checkout_commands) as mock_branch_cmds:
+        task = asyncio.create_task(worker.start())
+        await asyncio.sleep(0.05)
+        worker.stop()
+        await task
+
+        mock_branch_cmds.assert_called_once_with("feature/5-2-time-to-goal-motivational-clock")
+        mock_repo.complete_event.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_worker_issue_fallback_and_feature_branch(mock_repo, mock_sandbox, mock_session, settings):
+    """[AC 6, 7] Worker sem Story Key adota fallback issue-<id> e branch feature/issue-<id>."""
+    event = EventRecord(
+        id="13",
+        event_id="evt-issue-fallback",
+        event_type="issues",
+        status="PROCESSING",
+        repository="org/custom-repo",
+        payload={
+            "action": "labeled",
+            "issue": {
+                "number": 77,
+                "body": "Descrição genérica sem chave."
+            }
+        }
+    )
+    mock_repo.claim_event.side_effect = [event, None]
+
+    worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
+
+    with patch.object(worker.git_manager, "get_branch_checkout_commands", wraps=worker.git_manager.get_branch_checkout_commands) as mock_branch_cmds:
+        task = asyncio.create_task(worker.start())
+        await asyncio.sleep(0.05)
+        worker.stop()
+        await task
+
+        mock_branch_cmds.assert_called_once_with("feature/issue-77")
+        mock_repo.complete_event.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_worker_repository_priority_resolution(mock_repo, mock_sandbox, mock_session, settings):
+    """[AC 9] Leitura prioritária de event.repository -> payload.repository -> settings.GITHUB_REPOSITORY."""
+    # 1. event.repository tem prioridade máxima
+    event_1 = EventRecord(
+        id="14",
+        event_id="evt-repo-priority-1",
+        event_type="issues",
+        status="PROCESSING",
+        repository="org/repo-from-event-record",
+        payload={"repository": "org/repo-from-payload"}
+    )
+    mock_repo.claim_event.side_effect = [event_1, None]
+
+    worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
+
+    with patch.object(worker.git_manager, "get_setup_commands", wraps=worker.git_manager.get_setup_commands) as mock_setup_cmds:
+        task = asyncio.create_task(worker.start())
+        await asyncio.sleep(0.05)
+        worker.stop()
+        await task
+
+        call_kwargs = mock_setup_cmds.call_args.kwargs
+        assert call_kwargs["repository"] == "org/repo-from-event-record"
+
+    # 2. Fallback secundário para payload.repository quando event.repository for None
+    mock_repo.claim_event.reset_mock()
+    event_2 = EventRecord(
+        id="15",
+        event_id="evt-repo-priority-2",
+        event_type="issues",
+        status="PROCESSING",
+        repository=None,
+        payload={"repository": "org/repo-from-payload"}
+    )
+    mock_repo.claim_event.side_effect = [event_2, None]
+
+    with patch.object(worker.git_manager, "get_setup_commands", wraps=worker.git_manager.get_setup_commands) as mock_setup_cmds_2:
+        task = asyncio.create_task(worker.start())
+        await asyncio.sleep(0.05)
+        worker.stop()
+        await task
+
+        call_kwargs_2 = mock_setup_cmds_2.call_args.kwargs
+        assert call_kwargs_2["repository"] == "org/repo-from-payload"
+
 

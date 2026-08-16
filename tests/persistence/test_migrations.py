@@ -81,22 +81,23 @@ def test_events_table_schema_and_defaults(migrated_db):
     inspector = inspect(migrated_db)
     columns = {col["name"]: col for col in inspector.get_columns("events")}
     
-    expected_cols = ["id", "event_id", "event_type", "status", "payload", "retry_count", "error_log", "created_at", "updated_at"]
+    expected_cols = ["id", "event_id", "event_type", "status", "payload", "repository", "retry_count", "error_log", "created_at", "updated_at"]
     for col_name in expected_cols:
         assert col_name in columns, f"Column {col_name} missing from events table"
         
     with migrated_db.connect() as conn:
         res = conn.execute(
             text("""
-                INSERT INTO events (event_id, event_type, payload)
-                VALUES ('evt_test_1', 'push', '{"ref": "refs/heads/main"}'::jsonb)
-                RETURNING id, status, retry_count, error_log, created_at, updated_at;
+                INSERT INTO events (event_id, event_type, payload, repository)
+                VALUES ('evt_test_1', 'push', '{"ref": "refs/heads/main"}'::jsonb, 'owner/repo')
+                RETURNING id, status, repository, retry_count, error_log, created_at, updated_at;
             """)
         )
         row = res.fetchone()
         conn.commit()
         assert row is not None
         assert row.status == "PENDING"
+        assert row.repository == "owner/repo"
         assert row.retry_count == 0
         assert row.error_log is None
         assert row.created_at is not None
@@ -116,11 +117,41 @@ def test_migration_004_error_log_upgrade_downgrade(postgres_url):
         cols_003 = [col["name"] for col in inspector.get_columns("events")]
         assert "error_log" not in cols_003
 
-        # Upgrade de volta para head (004)
+        # Upgrade de volta para head (005)
         command.upgrade(alembic_cfg, "head")
         inspector = inspect(engine)
+        cols_head = [col["name"] for col in inspector.get_columns("events")]
+        assert "error_log" in cols_head
+        assert "repository" in cols_head
+    finally:
+        command.upgrade(alembic_cfg, "head")
+        engine.dispose()
+
+
+def test_migration_005_repository_upgrade_downgrade(postgres_url):
+    ini_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../persistence/alembic.ini"))
+    alembic_cfg = Config(ini_path)
+    alembic_cfg.set_main_option("sqlalchemy.url", postgres_url)
+
+    engine = create_engine(postgres_url)
+    try:
+        # Downgrade para 004
+        command.downgrade(alembic_cfg, "004_add_error_log_to_events")
+        inspector = inspect(engine)
         cols_004 = [col["name"] for col in inspector.get_columns("events")]
-        assert "error_log" in cols_004
+        assert "repository" not in cols_004
+        indexes_004 = [idx["name"] for idx in inspector.get_indexes("events")]
+        assert "idx_events_repository" not in indexes_004
+        assert "idx_events_repository_status" not in indexes_004
+
+        # Upgrade de volta para head (005)
+        command.upgrade(alembic_cfg, "head")
+        inspector = inspect(engine)
+        cols_005 = [col["name"] for col in inspector.get_columns("events")]
+        assert "repository" in cols_005
+        indexes_005 = [idx["name"] for idx in inspector.get_indexes("events")]
+        assert "idx_events_repository" in indexes_005
+        assert "idx_events_repository_status" in indexes_005
     finally:
         command.upgrade(alembic_cfg, "head")
         engine.dispose()
@@ -160,6 +191,12 @@ def test_events_indexes_exist(migrated_db):
     
     assert "idx_events_event_id" in index_names
     assert index_names["idx_events_event_id"]["column_names"] == ["event_id"]
+
+    assert "idx_events_repository" in index_names
+    assert index_names["idx_events_repository"]["column_names"] == ["repository"]
+
+    assert "idx_events_repository_status" in index_names
+    assert index_names["idx_events_repository_status"]["column_names"] == ["repository", "status"]
 
 
 def test_agent_memory_schema_and_indexes(migrated_db):

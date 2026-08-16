@@ -3,7 +3,7 @@ import hashlib
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text, bindparam, JSON, String
@@ -24,6 +24,7 @@ class EventRecord(BaseModel):
     event_type: str
     status: str
     payload: Dict[str, Any]
+    repository: Optional[str] = None
     retry_count: int = 0
     error_log: Optional[str] = None
     created_at: Optional[datetime] = None
@@ -65,11 +66,12 @@ class EventRepository:
         self,
         event_types: List[str],
         worker_id: str,
+        repository: Optional[Union[str, List[str]]] = None,
         skip_locked: bool = True,
         auto_commit: bool = True
     ) -> Optional[EventRecord]:
         """
-        Seleciona e trava atomicamente um evento em status PENDING filtrando por tipos.
+        Seleciona e trava atomicamente um evento em status PENDING filtrando por tipos e opcionalmente por repositório.
         Atualiza o status para 'PROCESSING' e grava log de auditoria 'CLAIMED'.
         """
         if not event_types:
@@ -79,12 +81,25 @@ class EventRepository:
 
         if is_postgres:
             lock_clause = "FOR UPDATE SKIP LOCKED" if skip_locked else "FOR UPDATE"
+            repo_filter_pg = ""
+            params_pg: Dict[str, Any] = {"event_types": event_types}
+            extra_bindparams = []
+
+            if isinstance(repository, str):
+                repo_filter_pg = "AND events.repository = :repository"
+                params_pg["repository"] = repository
+            elif isinstance(repository, (list, tuple, set)):
+                repo_filter_pg = "AND events.repository = ANY(:repositories)"
+                params_pg["repositories"] = list(repository)
+                extra_bindparams.append(bindparam("repositories", type_=ARRAY(String)))
+
             query = text(f"""
                 WITH eligible AS (
                     SELECT id 
                     FROM events 
                     WHERE status = 'PENDING' 
                       AND event_type = ANY(:event_types)
+                      {repo_filter_pg}
                     ORDER BY created_at ASC
                     LIMIT 1
                     {lock_clause}
@@ -94,10 +109,10 @@ class EventRepository:
                     updated_at = NOW()
                 FROM eligible
                 WHERE events.id = eligible.id
-                RETURNING events.id, events.event_id, events.event_type, events.status, events.payload, events.retry_count, events.created_at, events.updated_at, events.error_log;
-            """).bindparams(bindparam("event_types", type_=ARRAY(String)))
+                RETURNING events.id, events.event_id, events.event_type, events.status, events.payload, events.repository, events.retry_count, events.created_at, events.updated_at, events.error_log;
+            """).bindparams(bindparam("event_types", type_=ARRAY(String)), *extra_bindparams)
             try:
-                result = await self.session.execute(query, {"event_types": event_types})
+                result = await self.session.execute(query, params_pg)
                 row = result.fetchone()
             except Exception:
                 await self.session.rollback()
@@ -113,6 +128,7 @@ class EventRepository:
                 event_type=row.event_type,
                 status=row.status,
                 payload=payload_dict,
+                repository=getattr(row, "repository", None),
                 retry_count=row.retry_count,
                 error_log=getattr(row, "error_log", None),
                 created_at=row.created_at,
@@ -120,37 +136,51 @@ class EventRepository:
             )
         else:
             # Fallback atômico via subquery em SQLite / dialetos sem CTE SKIP LOCKED
-            stmt = text("""
+            repo_filter_sql = ""
+            params_sql: Dict[str, Any] = {"types": event_types}
+            extra_bindparams_sql = []
+
+            if isinstance(repository, str):
+                repo_filter_sql = "AND repository = :repository"
+                params_sql["repository"] = repository
+            elif isinstance(repository, (list, tuple, set)):
+                repo_filter_sql = "AND repository IN :repositories"
+                params_sql["repositories"] = list(repository)
+                extra_bindparams_sql.append(bindparam("repositories", expanding=True))
+
+            stmt = text(f"""
                 UPDATE events
                 SET status = 'PROCESSING', updated_at = CURRENT_TIMESTAMP
                 WHERE id = (
                     SELECT id FROM events
                     WHERE status = 'PENDING' AND event_type IN :types
+                    {repo_filter_sql}
                     ORDER BY created_at ASC
                     LIMIT 1
                 )
-                RETURNING id, event_id, event_type, status, payload, retry_count, created_at, updated_at, error_log
-            """).bindparams(bindparam("types", expanding=True))
+                RETURNING id, event_id, event_type, status, payload, repository, retry_count, created_at, updated_at, error_log
+            """).bindparams(bindparam("types", expanding=True), *extra_bindparams_sql)
 
             try:
-                result = await self.session.execute(stmt, {"types": event_types})
+                result = await self.session.execute(stmt, params_sql)
                 row = result.fetchone()
             except Exception as exc:
                 logger.warning("SQL execution in claim_event fallback failed: %s", exc)
-                # Fallback secundário se coluna error_log não existir em schemas antigos SQLite
+                # Fallback secundário se coluna error_log ou repository não existir em schemas antigos SQLite
                 try:
-                    stmt_legacy = text("""
+                    stmt_legacy = text(f"""
                         UPDATE events
                         SET status = 'PROCESSING', updated_at = CURRENT_TIMESTAMP
                         WHERE id = (
                             SELECT id FROM events
                             WHERE status = 'PENDING' AND event_type IN :types
+                            {repo_filter_sql}
                             ORDER BY created_at ASC
                             LIMIT 1
                         )
                         RETURNING id, event_id, event_type, status, payload, retry_count, created_at, updated_at
-                    """).bindparams(bindparam("types", expanding=True))
-                    result_legacy = await self.session.execute(stmt_legacy, {"types": event_types})
+                    """).bindparams(bindparam("types", expanding=True), *extra_bindparams_sql)
+                    result_legacy = await self.session.execute(stmt_legacy, params_sql)
                     row = result_legacy.fetchone()
                 except Exception:
                     await self.session.rollback()
@@ -167,6 +197,7 @@ class EventRepository:
                 event_type=row.event_type,
                 status="PROCESSING",
                 payload=payload_dict,
+                repository=getattr(row, "repository", None),
                 retry_count=row.retry_count,
                 error_log=getattr(row, "error_log", None),
                 created_at=row.created_at,

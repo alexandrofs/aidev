@@ -73,11 +73,11 @@ async def fetch_project_item_status_graphql(
             logger.warning("Erros retornados pelo GraphQL de ProjectV2Item: %s", data["errors"])
             return None
 
-        node_data = data.get("data", {}).get("node", {})
-        if not node_data:
+        node_data = (data.get("data") or {}).get("node") or {}
+        if not node_data or not isinstance(node_data, dict):
             return None
 
-        field_value = node_data.get("fieldValueByName", {})
+        field_value = node_data.get("fieldValueByName")
         if isinstance(field_value, dict):
             return field_value.get("name")
         return None
@@ -98,11 +98,16 @@ async def classify_event_status(
 ) -> str:
     """
     Avalia a elegibilidade de um evento recebido via webhook.
-    Um evento só é elegível (retorna 'PENDING') se estiver em uma coluna 'Ready' de um projeto.
+    Um evento é elegível (retorna 'PENDING') se for uma issue com action 'labeled',
+    ou se estiver em uma coluna 'Ready' de um projeto.
     Caso contrário, retorna 'IGNORED'.
     """
     if not isinstance(payload, dict):
         return "IGNORED"
+
+    # 0. Inspeção de webhook do tipo issues com action 'labeled'
+    if event_type == "issues" and payload.get("action") == "labeled":
+        return "PENDING"
 
     # 1. Inspeção direta em payload.status / payload.column / payload.status_name / payload.column_name
     for key in ["status", "column", "status_name", "column_name", "project_status"]:
