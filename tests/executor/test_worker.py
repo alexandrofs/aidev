@@ -482,8 +482,13 @@ async def test_worker_pr_failure_emits_pr_failed_audit_and_fails_event(mock_repo
     worker.stop()
     await task
 
-    # With resilient PR creation, worker logs warning and completes story
-    mock_repo.complete_event.assert_called_once()
+    audit_actions = [c.kwargs.get("action") for c in mock_repo.add_audit_log.call_args_list]
+    assert "PR_FAILED" in audit_actions
+    mock_repo.complete_event.assert_not_called()
+    mock_repo.fail_event.assert_called_once()
+    fail_args = mock_repo.fail_event.call_args
+    assert fail_args.args[0] == "evt-1100"
+    assert "Falha na abertura de Pull Request no GitHub" in fail_args.kwargs["error_message"]
 
 
 def test_worker_load_target_repo_config(tmp_path):

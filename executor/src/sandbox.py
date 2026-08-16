@@ -79,6 +79,9 @@ class SandboxSession:
         if len(logs) > max_log_bytes:
             logs = logs[:max_log_bytes] + "\n... [logs truncados pelo executor devido ao limite de tamanho]"
 
+        if logs and logs.strip():
+            logger.info(f"[SANDBOX {self.id[:12]} OUTPUT - exit {exit_code}]:\n{logs.strip()}")
+
         return {
             "exit_code": exit_code,
             "logs": logs,
