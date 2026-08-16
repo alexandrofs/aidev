@@ -270,6 +270,9 @@ class ExecutorWorker:
                 exit_code = result.get("exit_code", -1)
                 logs = result.get("logs", "")
 
+                if logs and logs.strip():
+                    logger.info(f"[HARNESS - FASE '{phase}'] Logs da sessão (exit {exit_code}):\n{logs.strip()}")
+
                 phase_results.append({
                     "phase": phase,
                     "exit_code": exit_code,
@@ -369,7 +372,20 @@ class ExecutorWorker:
                             logger.warning(f"Erro ao registrar audit_log PR_CREATED: {log_err}")
 
                 except Exception as pr_err:
-                    logger.warning(f"Falha na abertura de Pull Request no GitHub: {pr_err}")
+                    err_msg = f"Falha na abertura de Pull Request no GitHub: {pr_err}"
+                    logger.error(err_msg)
+                    if hasattr(self.repo, "add_audit_log"):
+                        try:
+                            await self.repo.add_audit_log(
+                                event_id=event.event_id,
+                                action="PR_FAILED",
+                                actor=self.settings.WORKER_ID,
+                                details={"story_id": story_id, "error": str(pr_err)}
+                            )
+                        except Exception as log_err:
+                            logger.warning(f"Erro ao registrar audit_log PR_FAILED: {log_err}")
+                    await self.repo.fail_event(event.event_id, self.settings.WORKER_ID, error_message=err_msg)
+                    return
 
             if pr_info:
                 summary_data["pr_url"] = pr_info.get("pr_html_url") or pr_info.get("pr_url")
