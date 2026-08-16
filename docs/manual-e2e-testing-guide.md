@@ -9,8 +9,9 @@ Este guia documenta como realizar testes integrados ponta a ponta (E2E) no ecoss
 O sistema foi concebido para ser **agnóstico de linguagem e framework**:
 
 - **Isolamento por Imagem Docker (`image`)**: O container efêmero é instanciado a partir da imagem OCI correspondente à stack do projeto (ex: `eclipse-temurin:21-alpine` para Java, `dart:stable` ou `ghcr.io/cirruslabs/flutter:latest` para Flutter, `python:3.12-slim` para Python, `node:20-alpine` para TypeScript/React).
+- **Manifesto do Repositório Alvo (`.aidev.yaml`)**: O repositório alvo define suas configurações e vinculação de GitHub Projects de forma autocontida e descentralizada.
 - **Injeção Dinâmica de Contexto**: O sandbox recebe MCPs, Skills e Prompts específicos da fase.
-- **Validações Pré-Entrega (`validation_commands`)**: Cada tecnologia executa sua suíte de linters e testes nativos (ex: `mvn test`, `flutter test`, `pytest`).
+- **Agnosticismo & Harness de IA**: A validação (TDD, testes unitários e de integração da stack) é executada e garantida pelo próprio harness do agente (ex: `bmad-dev-story` e `bmad-code-review`).
 - **Rastreabilidade e Memória**: Todas as evidências são gravadas em `audit_logs`, `agent_memory` no PostgreSQL e consolidadas no arquivo `.memlog.md`.
 
 ---

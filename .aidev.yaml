@@ -1,0 +1,18 @@
+# Manifesto de Configuração do Repositório Alvo para o AI Developer (AIDEV)
+# Este arquivo reside na raiz de cada repositório alvo para definir suas regras de automação.
+
+version: "1"
+
+github:
+  repository: "alexandrofs/aidev"
+  project_number: 1
+  project_id: "PVT_kwDO_SAMPLE_ID"
+  base_branch: "main"
+  ready_label: "Ready for AI Dev"
+  review_label: "In Review"
+
+workflow:
+  # Fases sequenciais autônomas executadas pelo OpenCode (a validação e testes são garantidos pelo próprio harness do agente)
+  phases:
+    - "coding"
+    - "review"

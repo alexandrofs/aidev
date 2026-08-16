@@ -186,6 +186,55 @@ O `ai-dev-executor` é o worker em Python 3.12 responsável por consumir eventos
 | `POSTGRES_DB` | `aidev` | Nome do banco de dados |
 | `POSTGRES_USER` | `aidev` | Usuário do PostgreSQL |
 | `POSTGRES_PASSWORD` | `aidev` | Senha do PostgreSQL |
+| `OPENROUTER_API_KEY` | `opcional` | Chave de API do OpenRouter para o OpenCode no Sandbox |
+| `OPENCODE_MODEL` | `opcional` | Modelo padrão de IA (ex: `openrouter/anthropic/claude-3.5-sonnet`) |
+
+---
+
+## Manifesto do Repositório Alvo (`.aidev.yaml`)
+
+Em arquiteturas multi-repositório, a plataforma `aidev` é totalmente **agnóstica**. Cada **repositório alvo** contém seu próprio arquivo `.aidev.yaml` (ou `.aidev.json`) na raiz para definir suas regras de automação e vinculação:
+
+```yaml
+# .aidev.yaml (na raiz do repositório alvo)
+version: "1"
+
+github:
+  repository: "org/meu-projeto"
+  project_number: 1                  # Número do GitHub Projects v2
+  project_id: "PVT_kwDO..."           # ID GraphQL do Project v2 (opcional)
+  base_branch: "main"
+  ready_label: "Ready for AI Dev"
+  review_label: "In Review"
+
+workflow:
+  phases:
+    - "coding"                       # OpenCode executa bmad-dev-story (TDD/testes nativos do projeto)
+    - "review"                       # OpenCode executa bmad-code-review (auto-auditoria de qualidade)
+```
+
+> **Agnosticismo de Validação**: A validação de código, testes unitários e cobertura de critérios de aceite são de responsabilidade do próprio **harness do agente** (durante as fases de desenvolvimento e revisão). A plataforma `aidev` orquestra o ciclo contínuo e realiza a entrega quando o agente finaliza com sucesso.
+
+### Precedência de Resolução de Configurações
+1. **Payload do Evento Webhook** *(maior precedência)*
+2. **Manifesto `.aidev.yaml` do Repositório Alvo** *(específico do projeto)*
+3. **Variáveis de Ambiente / `.env` da Plataforma** *(fallback global)*
+
+### Integração BMAD no Repositório Alvo (Opcional)
+
+Caso o repositório alvo utilize o framework **BMAD** para geração de histórias e queira automatizar a abertura de Issues padronizadas no GitHub, adicione o arquivo `_bmad/custom/bmad-create-story.toml` no **repositório alvo**:
+
+```toml
+# _bmad/custom/bmad-create-story.toml (no repositório alvo)
+[workflow]
+persistent_facts = [
+  "PADRÃO DETERMINÍSTICO DE HISTÓRIAS: Toda história gerada deve ter seu identificador canônico no formato '{epic_num}.{story_num}' (ex: '1.4') e sua chave de arquivo no formato '{epic_num}-{story_num}-{slug}' (ex: '1-4-adicao-da-coluna-repository-no-event-store').",
+  "PADRÃO DETERMINÍSTICO DE ISSUES GITHUB: Toda issue associada à história deve conter no cabeçalho os metadados: Story ID, Story Key e o caminho exato do arquivo de especificação em '_bmad-output/implementation-artifacts/{story_key}.md'."
+]
+
+on_complete = "Após salvar o arquivo da história e atualizar o sprint-status.yaml, verificar as configurações do repositório alvo (.aidev.yaml se existir) e criar a Issue correspondente no GitHub com a label 'Ready for AI Dev', título padronizado 'feat(story-{{epic_num}}.{{story_num}}): {{story_title}}' e corpo com o link explícito para '_bmad-output/implementation-artifacts/{{story_key}}.md'."
+```
+
 
 ---
 

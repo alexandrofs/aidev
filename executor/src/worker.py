@@ -1,3 +1,6 @@
+import os
+import json
+import yaml
 import asyncio
 import logging
 import re
@@ -23,16 +26,42 @@ class ExecutorWorker:
     Worker assíncrono de consumo e orquestração de sessões de sandbox Docker.
     Consome eventos de status PENDING via claim_event (SKIP LOCKED) e orquestra o ciclo contínuo:
     1. Criação de SandboxSession efêmero e clone do repositório alvo
-    2. Criação do branch de trabalho (feature branch)
-    3. Execução autônoma da Fase 1 (Coding) via OpenCode CLI e bmad-dev-story
-    4. Execução autônoma da Fase 2 (Review) via OpenCode CLI e bmad-code-review
-    5. Execução do pipeline de validação local no ambiente configurado
+    2. Leitura do manifesto .aidev.yaml do repositório alvo (se existir)
+    3. Criação do branch de trabalho (feature branch)
+    4. Execução autônoma da Fase 1 (Coding) via OpenCode CLI e bmad-dev-story (com validação TDD pelo harness)
+    5. Execução autônoma da Fase 2 (Review) via OpenCode CLI e bmad-code-review (auto-auditoria pelo harness)
     6. Commit e Git Push das alterações para o repositório remoto
     7. Geração semântica e abertura de Pull Request no GitHub
     8. Sincronização de status com GitHub Projects v2
     9. Persistência de memória hierárquica (PostgreSQL agent_memory + repositório .memlog.md)
     10. Teardown completo e destruição do sandbox ao final
     """
+
+    @staticmethod
+    def load_target_repo_config(workspace_dir: Optional[str]) -> Dict[str, Any]:
+        """
+        Lê o manifesto .aidev.yaml, .aidev.yml ou .aidev.json na raiz do repositório alvo.
+        Permite que cada projeto alvo defina seus próprios comandos de validação, project_id, etc.
+        """
+        if not workspace_dir or not os.path.exists(workspace_dir):
+            return {}
+
+        candidates = [".aidev.yaml", ".aidev.yml", ".aidev.json"]
+        for fname in candidates:
+            fpath = os.path.join(workspace_dir, fname)
+            if os.path.isfile(fpath):
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        if fname.endswith(".json"):
+                            data = json.load(f)
+                        else:
+                            data = yaml.safe_load(f)
+                        if isinstance(data, dict):
+                            logger.info(f"Manifesto de configuração do repositório alvo carregado com sucesso de '{fname}'.")
+                            return data
+                except Exception as err:
+                    logger.warning(f"Falha ao interpretar manifesto {fname} no workspace alvo: {err}")
+        return {}
 
     def __init__(
         self,
@@ -184,6 +213,11 @@ class ExecutorWorker:
             for bcmd in branch_cmds:
                 session.exec(bcmd)
 
+            # 3.1 Carregar manifesto de configuração do repositório alvo (.aidev.yaml / .aidev.json) se existir
+            target_repo_config = self.load_target_repo_config(getattr(session, "temp_dir", None))
+            if target_repo_config:
+                logger.info(f"Configuração do repositório alvo detectada: {list(target_repo_config.keys())}")
+
             # 4. Execução Contínua das Fases (Coding e Review) via OpenCode CLI
             for phase in phases:
                 if hasattr(self.repo, "add_audit_log"):
@@ -241,138 +275,112 @@ class ExecutorWorker:
                     except Exception as log_err:
                         logger.warning(f"Erro ao registrar audit_log WORKFLOW_PHASE_COMPLETED: {log_err}")
 
-            # 5. Pipeline de Validação Integrada no Próprio Sandbox Ativo
-            validation_cmds = payload.get("validation_commands", getattr(self.settings, "VALIDATION_COMMANDS", ["pytest"]))
-            logger.info(f"Executando pipeline de validação integrada no Sandbox para story: {story_id}")
-
-            validation_results = self.validation_pipeline.run_validations(
-                commands=validation_cmds,
-                session=session
-            )
-
-            validation_passed = all(res.passed for res in validation_results)
-            passed_count = sum(1 for res in validation_results if res.passed)
-            failed_count = len(validation_results) - passed_count
+            # 5. Resumo da Execução e Preparação de Entrega
             summary_data = {
                 "title": payload.get("title") or payload.get("story_title") or f"Execução {event.event_id}",
-                "status": "COMPLETED" if validation_passed else "VALIDATION_FAILED",
-                "actions": [f"Execução das fases: {', '.join(phases)}", f"Validação integrada ({len(validation_cmds)} comandos)"],
-                "test_results": {"passed": passed_count, "failed": failed_count},
-                "decisions": f"Validação pré-entrega {'aprovada' if validation_passed else 'reprovada com falhas'}"
+                "status": "COMPLETED",
+                "actions": [f"Execução das fases autônomas: {', '.join(phases)}"],
+                "decisions": "Implementação e revisão autônomas validadas pelo harness do agente."
             }
             if "review" in phases:
                 summary_data["review_summary"] = review_summary
 
-            if validation_passed:
-                if hasattr(self.repo, "add_audit_log"):
-                    try:
-                        await self.repo.add_audit_log(
-                            event_id=event.event_id,
-                            action="VALIDATION_PASSED",
-                            actor=self.settings.WORKER_ID,
-                            details={"story_id": story_id, "commands": validation_cmds}
-                        )
-                    except Exception as log_err:
-                        logger.warning(f"Erro ao registrar audit_log VALIDATION_PASSED: {log_err}")
+            # 6. Commit e Push no Sandbox
+            if repo_name and token:
+                logger.info(f"Comitando e fazendo push do branch {head_branch}...")
+                push_cmds = self.git_manager.get_commit_and_push_commands(
+                    branch_name=head_branch,
+                    commit_message=f"feat({story_id}): {summary_data['title']}",
+                    repository=repo_name,
+                    token=token
+                )
+                for pcmd in push_cmds:
+                    push_res = session.exec(pcmd)
+                    if push_res.get("exit_code", -1) != 0:
+                        logger.warning(f"Aviso no Git Push: {push_res.get('logs')}")
 
-                # 6. Commit e Push no Sandbox
-                if repo_name and token:
-                    logger.info(f"Comitando e fazendo push do branch {head_branch}...")
-                    push_cmds = self.git_manager.get_commit_and_push_commands(
-                        branch_name=head_branch,
-                        commit_message=f"feat({story_id}): {summary_data['title']}",
-                        repository=repo_name,
-                        token=token
-                    )
-                    for pcmd in push_cmds:
-                        push_res = session.exec(pcmd)
-                        if push_res.get("exit_code", -1) != 0:
-                            logger.warning(f"Aviso no Git Push: {push_res.get('logs')}")
+            # 7. Abertura Semântica do Pull Request (Story 3.2)
+            is_dry_run = getattr(self.settings, "GITHUB_DRY_RUN", False) or getattr(self.github_client, "dry_run", False)
+            client_token = getattr(self.github_client, "token", None)
+            has_token = bool(client_token) if client_token is not None else bool(token)
+            is_mock_client = hasattr(self.github_client, "_mock_name") or hasattr(self.github_client, "return_value")
+            pr_info = None
 
-                # 7. Abertura Semântica do Pull Request (Story 3.2)
-                is_dry_run = getattr(self.settings, "GITHUB_DRY_RUN", False) or getattr(self.github_client, "dry_run", False)
-                client_token = getattr(self.github_client, "token", None)
-                has_token = bool(client_token) if client_token is not None else bool(token)
-                is_mock_client = hasattr(self.github_client, "_mock_name") or hasattr(self.github_client, "return_value")
-                pr_info = None
+            if is_dry_run or (has_token and repo_name) or (is_mock_client and repo_name):
+                target_repo = repo_name or "local/repo"
+                title_text = payload.get("title") or payload.get("story_title") or f"Story {story_id}"
+                project_item_id = payload.get("project_item_id") or payload.get("project_card_id")
+                target_project_id = (
+                    target_repo_config.get("github", {}).get("project_id")
+                    if isinstance(target_repo_config.get("github"), dict)
+                    else target_repo_config.get("project_id")
+                )
+                project_id = payload.get("project_id") or target_project_id or getattr(self.settings, "GITHUB_PROJECT_ID", None)
 
-                if is_dry_run or (has_token and repo_name) or (is_mock_client and repo_name):
-                    target_repo = repo_name or "local/repo"
-                    title_text = payload.get("title") or payload.get("story_title") or f"Story {story_id}"
-                    project_item_id = payload.get("project_item_id") or payload.get("project_card_id")
-                    project_id = payload.get("project_id") or getattr(self.settings, "GITHUB_PROJECT_ID", None)
-
-                    pr_title = self.github_client.generate_pr_title(story_id=story_id, title=title_text)
-                    pr_body = self.github_client.format_semantic_pr_body(
-                        story_id=story_id,
-                        title=title_text,
-                        phase_results=phase_results,
-                        validation_results=validation_results,
-                        review_summary=review_summary,
-                        project_item_id=project_item_id
-                    )
-
-                    try:
-                        pr_info = await self.github_client.create_pull_request(
-                            repo=target_repo,
-                            title=pr_title,
-                            body=pr_body,
-                            head_branch=head_branch,
-                            base_branch=base_branch
-                        )
-                        logger.info(f"Pull Request criado com sucesso: {pr_info.get('pr_html_url') or pr_info.get('pr_url')}")
-
-                        if hasattr(self.repo, "add_audit_log"):
-                            try:
-                                await self.repo.add_audit_log(
-                                    event_id=event.event_id,
-                                    action="PR_CREATED",
-                                    actor=self.settings.WORKER_ID,
-                                    details={"story_id": story_id, "pr_url": pr_info.get("pr_html_url") or pr_info.get("pr_url")}
-                                )
-                            except Exception as log_err:
-                                logger.warning(f"Erro ao registrar audit_log PR_CREATED: {log_err}")
-
-                    except Exception as pr_err:
-                        logger.warning(f"Falha na abertura de Pull Request no GitHub: {pr_err}")
-
-                if pr_info:
-                    summary_data["pr_url"] = pr_info.get("pr_html_url") or pr_info.get("pr_url")
-                    summary_data["pr_number"] = pr_info.get("pr_number")
-                    summary_data["pull_request_status"] = "OPEN"
-                    summary_data["head_branch"] = pr_info.get("head_branch")
-
-                # 8. Persistência de Memória Hierárquica
-                await self.memory_manager.record_daily_summary(
+                pr_title = self.github_client.generate_pr_title(story_id=story_id, title=title_text)
+                pr_body = self.github_client.format_semantic_pr_body(
                     story_id=story_id,
-                    summary_data=summary_data,
-                    event_id=event.event_id
+                    title=title_text,
+                    phase_results=phase_results,
+                    review_summary=review_summary,
+                    project_item_id=project_item_id
                 )
 
-                workspace_path = self.settings.resolve_path(payload.get("workspace_path", "."))
                 try:
-                    await asyncio.to_thread(
-                        self.memory_manager.sync_memlog_file,
-                        workspace_path=workspace_path,
-                        story_id=story_id,
-                        summary_data=summary_data
+                    pr_info = await self.github_client.create_pull_request(
+                        repo=target_repo,
+                        title=pr_title,
+                        body=pr_body,
+                        head_branch=head_branch,
+                        base_branch=base_branch
                     )
-                except Exception as mem_err:
-                    logger.warning(f"Erro ao sincronizar .memlog.md: {mem_err}")
+                    logger.info(f"Pull Request criado com sucesso: {pr_info.get('pr_html_url') or pr_info.get('pr_url')}")
 
-                # 9. Concluir evento no PostgreSQL
-                await self.repo.complete_event(
-                    event.event_id,
-                    self.settings.WORKER_ID,
-                    details={"summary": summary_data, "container_id": session.id}
+                    if hasattr(self.repo, "add_audit_log"):
+                        try:
+                            await self.repo.add_audit_log(
+                                event_id=event.event_id,
+                                action="PR_CREATED",
+                                actor=self.settings.WORKER_ID,
+                                details={"story_id": story_id, "pr_url": pr_info.get("pr_html_url") or pr_info.get("pr_url")}
+                            )
+                        except Exception as log_err:
+                            logger.warning(f"Erro ao registrar audit_log PR_CREATED: {log_err}")
+
+                except Exception as pr_err:
+                    logger.warning(f"Falha na abertura de Pull Request no GitHub: {pr_err}")
+
+            if pr_info:
+                summary_data["pr_url"] = pr_info.get("pr_html_url") or pr_info.get("pr_url")
+                summary_data["pr_number"] = pr_info.get("pr_number")
+                summary_data["pull_request_status"] = "OPEN"
+                summary_data["head_branch"] = pr_info.get("head_branch")
+
+            # 8. Persistência de Memória Hierárquica
+            await self.memory_manager.record_daily_summary(
+                story_id=story_id,
+                summary_data=summary_data,
+                event_id=event.event_id
+            )
+
+            workspace_path = self.settings.resolve_path(payload.get("workspace_path", "."))
+            try:
+                await asyncio.to_thread(
+                    self.memory_manager.sync_memlog_file,
+                    workspace_path=workspace_path,
+                    story_id=story_id,
+                    summary_data=summary_data
                 )
-                logger.info(f"Evento {event.event_id} (Story: {story_id}) concluído com sucesso [COMPLETED].")
+            except Exception as mem_err:
+                logger.warning(f"Erro ao sincronizar .memlog.md: {mem_err}")
 
-            else:
-                err_msg = f"Validação pré-entrega reprovada com {failed_count} falha(s)."
-                logger.warning(f"Evento {event.event_id} reprovado na validação: {err_msg}")
-                await self.memory_manager.record_daily_summary(story_id=story_id, summary_data=summary_data, event_id=event.event_id)
-                await self.repo.fail_event(event.event_id, self.settings.WORKER_ID, error_message=err_msg)
+            # 9. Concluir evento no PostgreSQL
+            await self.repo.complete_event(
+                event.event_id,
+                self.settings.WORKER_ID,
+                details={"summary": summary_data, "container_id": session.id}
+            )
+            logger.info(f"Evento {event.event_id} (Story: {story_id}) concluído com sucesso [COMPLETED].")
 
         except Exception as exc:
             err_msg = f"Exceção durante o processamento do evento {event.event_id}: {str(exc)}"

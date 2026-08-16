@@ -87,13 +87,6 @@ async def test_worker_claim_and_complete(mock_repo, mock_sandbox, mock_session, 
     assert mock_session.exec.called
 
     mock_repo.save_agent_memory.assert_called_once()
-    validation_passed_calls = [
-        c for c in mock_repo.add_audit_log.call_args_list
-        if c.kwargs.get("action") == "VALIDATION_PASSED"
-    ]
-    assert len(validation_passed_calls) == 1, "Audit log VALIDATION_PASSED deve ser emitido no fluxo de sucesso"
-    assert validation_passed_calls[0].kwargs.get("details", {}).get("story_id") == "2-3-story"
-
     mock_repo.complete_event.assert_called_once()
     call_args = mock_repo.complete_event.call_args
     assert call_args.args[0] == "evt-100"
@@ -245,20 +238,18 @@ async def test_worker_validation_failure_blocks_completion(mock_repo, mock_sandb
         status="PROCESSING",
         payload={
             "command": "python code.py",
-            "story_id": "2-3-pipeline-failure-test"
+            "story_id": "2-3-phase-failure-test"
         }
     )
     mock_repo.claim_event.side_effect = [event, None]
 
-    # Setup git ok, coding ok, review ok, validation fails
+    # Setup git ok, coding fails
     mock_session.exec.side_effect = [
         {"exit_code": 0, "logs": "Git setup 1", "container_id": "c-1"},
         {"exit_code": 0, "logs": "Git setup 2", "container_id": "c-1"},
         {"exit_code": 0, "logs": "Git setup 3", "container_id": "c-1"},
         {"exit_code": 0, "logs": "Branch ok", "container_id": "c-1"},
-        {"exit_code": 0, "logs": "Coding completed OK", "container_id": "c-1"},
-        {"exit_code": 0, "logs": "Review completed OK", "container_id": "c-1"},
-        {"exit_code": 1, "logs": "Pytest failed: 3 tests errored", "container_id": "c-1"}
+        {"exit_code": 1, "logs": "Coding phase failed: tests or syntax errors", "container_id": "c-1"}
     ]
 
     worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
@@ -272,12 +263,7 @@ async def test_worker_validation_failure_blocks_completion(mock_repo, mock_sandb
     mock_repo.fail_event.assert_called_once()
     fail_args = mock_repo.fail_event.call_args
     assert fail_args.args[0] == "evt-600"
-    assert "Validação pré-entrega reprovada" in fail_args.kwargs["error_message"]
-
-    mock_repo.save_agent_memory.assert_called_once()
-    mem_call = mock_repo.save_agent_memory.call_args.kwargs
-    assert mem_call["story_id"] == "2-3-pipeline-failure-test"
-    assert mem_call["content"]["status"] == "VALIDATION_FAILED"
+    assert "falhou no sandbox" in fail_args.kwargs["error_message"]
 
 
 @pytest.mark.asyncio
@@ -348,7 +334,6 @@ async def test_worker_full_story_3_1_workflow_audit_and_readiness(mock_repo, moc
     audit_actions = [c.kwargs.get("action") for c in mock_repo.add_audit_log.call_args_list]
     assert "WORKFLOW_PHASE_STARTED" in audit_actions
     assert "WORKFLOW_PHASE_COMPLETED" in audit_actions
-    assert "VALIDATION_PASSED" in audit_actions
 
     mock_repo.complete_event.assert_called_once()
     mock_repo.save_agent_memory.assert_called_once()
@@ -499,3 +484,28 @@ async def test_worker_pr_failure_emits_pr_failed_audit_and_fails_event(mock_repo
 
     # With resilient PR creation, worker logs warning and completes story
     mock_repo.complete_event.assert_called_once()
+
+
+def test_worker_load_target_repo_config(tmp_path):
+    # 1. Sem arquivo de manifesto
+    assert ExecutorWorker.load_target_repo_config(str(tmp_path)) == {}
+    assert ExecutorWorker.load_target_repo_config(None) == {}
+
+    # 2. Com .aidev.yaml
+    yaml_content = """
+version: "1"
+github:
+  repository: "myorg/myapp"
+  project_id: "PVT_kwDO_TARGET"
+validation:
+  commands:
+    - "mvn test"
+"""
+    yaml_file = tmp_path / ".aidev.yaml"
+    yaml_file.write_text(yaml_content, encoding="utf-8")
+
+    cfg = ExecutorWorker.load_target_repo_config(str(tmp_path))
+    assert cfg["version"] == "1"
+    assert cfg["github"]["project_id"] == "PVT_kwDO_TARGET"
+    assert cfg["validation"]["commands"] == ["mvn test"]
+
