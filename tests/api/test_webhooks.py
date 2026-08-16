@@ -1,10 +1,11 @@
 import json
+from unittest.mock import patch, AsyncMock
 import pytest
 from sqlalchemy import text
 
 
 async def test_webhook_valid_signature_and_persistence(async_client, db_session, make_signature):
-    payload = {"action": "edited", "issue": {"number": 42}}
+    payload = {"action": "edited", "issue": {"number": 42}, "status": "Ready"}
     body_bytes = json.dumps(payload).encode("utf-8")
     signature = make_signature(body_bytes)
 
@@ -125,43 +126,60 @@ async def test_webhook_missing_delivery_header(async_client, make_signature):
 
 
 async def test_webhook_idempotent_ingestion(async_client, db_session, make_signature):
-    payload = {"action": "opened"}
+    payload = {"action": "opened", "status": "Ready"}
+    body_bytes = json.dumps(payload).encode("utf-8")
+    signature = make_signature(body_bytes)
+
+    shared_delivery = "delivery-duplicate-uuid-999"
+
+    # First request
+    res1 = await async_client.post(
+        "/webhooks/github",
+        content=body_bytes,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "X-GitHub-Event": "issues",
+            "X-GitHub-Delivery": shared_delivery,
+        }
+    )
+    assert res1.status_code == 202
+    assert res1.json()["message"] == "Event received and persisted"
+    assert res1.json()["status"] == "PENDING"
+
+    # Second duplicate request
+    res2 = await async_client.post(
+        "/webhooks/github",
+        content=body_bytes,
+        headers={
+            "X-Hub-Signature-256": signature,
+            "X-GitHub-Event": "issues",
+            "X-GitHub-Delivery": shared_delivery,
+        }
+    )
+    assert res2.status_code == 202
+    assert res2.json()["message"] == "Event already processed (idempotent duplicate)"
+    assert res2.json()["event_id"] == "delivery-duplicate-uuid-999"
+    assert res2.json()["status"] == "PENDING"
+
+
+async def test_webhook_event_type_projects_v2_item_ready(async_client, db_session, make_signature):
+    """[P1] Aceita evento projects_v2_item com status Ready e persiste como PENDING."""
+    payload = {
+        "action": "edited",
+        "changes": {
+            "field_value": {
+                "field_name": "Status",
+                "to": {"name": "Ready"}
+            }
+        }
+    }
     body_bytes = json.dumps(payload).encode("utf-8")
     signature = make_signature(body_bytes)
 
     headers = {
         "X-Hub-Signature-256": signature,
-        "X-GitHub-Event": "pull_request",
-        "X-GitHub-Delivery": "delivery-duplicate-uuid-999"
-    }
-
-    # First request
-    res1 = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
-    assert res1.status_code == 202
-    assert res1.json()["message"] == "Event received and persisted"
-
-    # Second duplicate request
-    res2 = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
-    assert res2.status_code == 202
-    assert res2.json()["message"] == "Event already processed (idempotent duplicate)"
-    assert res2.json()["event_id"] == "delivery-duplicate-uuid-999"
-
-
-# ---------------------------------------------------------------------------
-# Expanded API tests (bmad-testarch-automate expansion pass)
-# ---------------------------------------------------------------------------
-
-
-async def test_webhook_event_type_projects_v2_item(async_client, db_session, make_signature):
-    """[P1] Aceita evento do tipo projects_v2_item e persiste o tipo correto."""
-    payload = {"action": "edited", "changes": {}}
-    body_bytes = b'{"action": "edited", "changes": {}}'
-    signature = make_signature(body_bytes)
-
-    headers = {
-        "X-Hub-Signature-256": signature,
         "X-GitHub-Event": "projects_v2_item",
-        "X-GitHub-Delivery": "delivery-projects-v2-item-001",
+        "X-GitHub-Delivery": "delivery-projects-v2-item-ready-001",
         "Content-Type": "application/json",
     }
 
@@ -169,20 +187,172 @@ async def test_webhook_event_type_projects_v2_item(async_client, db_session, mak
     assert response.status_code == 202
     data = response.json()
     assert data["event_type"] == "projects_v2_item"
+    assert data["status"] == "PENDING"
 
     result = await db_session.execute(
-        __import__("sqlalchemy").text(
-            "SELECT event_type FROM events WHERE event_id = :event_id"
-        ),
-        {"event_id": "delivery-projects-v2-item-001"},
+        text("SELECT event_type, status FROM events WHERE event_id = :event_id"),
+        {"event_id": "delivery-projects-v2-item-ready-001"},
     )
     row = result.fetchone()
     assert row is not None
     assert row.event_type == "projects_v2_item"
+    assert row.status == "PENDING"
 
 
-async def test_webhook_event_type_workflow_run(async_client, db_session, make_signature):
-    """[P1] Aceita evento do tipo workflow_run e persiste corretamente."""
+async def test_webhook_event_type_projects_v2_item_ignored(async_client, db_session, make_signature):
+    """[P1] Evento projects_v2_item com status Todo é persistido como IGNORED."""
+    payload = {
+        "action": "edited",
+        "changes": {
+            "field_value": {
+                "field_name": "Status",
+                "to": {"name": "Todo"}
+            }
+        }
+    }
+    body_bytes = json.dumps(payload).encode("utf-8")
+    signature = make_signature(body_bytes)
+
+    headers = {
+        "X-Hub-Signature-256": signature,
+        "X-GitHub-Event": "projects_v2_item",
+        "X-GitHub-Delivery": "delivery-projects-v2-item-ignored-001",
+        "Content-Type": "application/json",
+    }
+
+    response = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
+    assert response.status_code == 202
+    data = response.json()
+    assert data["event_type"] == "projects_v2_item"
+    assert data["status"] == "IGNORED"
+
+    result = await db_session.execute(
+        text("SELECT event_type, status FROM events WHERE event_id = :event_id"),
+        {"event_id": "delivery-projects-v2-item-ignored-001"},
+    )
+    row = result.fetchone()
+    assert row is not None
+    assert row.status == "IGNORED"
+
+
+async def test_webhook_projects_v2_item_reordered_graphql_ready(async_client, db_session, make_signature):
+    """[P1] Evento projects_v2_item reordered resolve status Ready via GraphQL e persiste como PENDING."""
+    payload = {
+        "action": "reordered",
+        "projects_v2_item": {
+            "id": 229641266,
+            "node_id": "PVTI_lADOEu2-uM4Bgi4wzg2wDDI",
+            "project_node_id": "PVT_kwDOEu2-uM4Bgi4w",
+            "content_node_id": "I_kwDOMrPR8s8AAAABM_ECQA",
+            "content_type": "Issue"
+        },
+        "changes": {
+            "previous_projects_v2_item_node_id": {"from": None, "to": None}
+        }
+    }
+    body_bytes = json.dumps(payload).encode("utf-8")
+    signature = make_signature(body_bytes)
+
+    headers = {
+        "X-Hub-Signature-256": signature,
+        "X-GitHub-Event": "projects_v2_item",
+        "X-GitHub-Delivery": "delivery-pv2-reordered-ready-001",
+        "Content-Type": "application/json",
+    }
+
+    with patch("src.services.triage.fetch_project_item_status_graphql", new=AsyncMock(return_value="Ready")):
+        with patch("src.services.triage.settings.GITHUB_TOKEN", "mock-token"):
+            response = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == "PENDING"
+
+
+async def test_webhook_projects_v2_item_reordered_graphql_not_ready(async_client, db_session, make_signature):
+    """[P1] Evento projects_v2_item reordered resolve status In Progress via GraphQL e persiste como IGNORED."""
+    payload = {
+        "action": "reordered",
+        "projects_v2_item": {
+            "id": 229641266,
+            "node_id": "PVTI_lADOEu2-uM4Bgi4wzg2wDDI",
+            "project_node_id": "PVT_kwDOEu2-uM4Bgi4w",
+            "content_node_id": "I_kwDOMrPR8s8AAAABM_ECQA",
+            "content_type": "Issue"
+        },
+        "changes": {
+            "previous_projects_v2_item_node_id": {"from": None, "to": None}
+        }
+    }
+    body_bytes = json.dumps(payload).encode("utf-8")
+    signature = make_signature(body_bytes)
+
+    headers = {
+        "X-Hub-Signature-256": signature,
+        "X-GitHub-Event": "projects_v2_item",
+        "X-GitHub-Delivery": "delivery-pv2-reordered-inprogress-001",
+        "Content-Type": "application/json",
+    }
+
+    with patch("src.services.triage.fetch_project_item_status_graphql", new=AsyncMock(return_value="In Progress")):
+        with patch("src.services.triage.settings.GITHUB_TOKEN", "mock-token"):
+            response = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
+            assert response.status_code == 202
+            data = response.json()
+            assert data["status"] == "IGNORED"
+
+
+async def test_webhook_project_card_ready(async_client, db_session, make_signature):
+    """[P1] Evento project_card com column_name Ready persiste como PENDING."""
+    payload = {
+        "action": "moved",
+        "project_card": {
+            "id": 123,
+            "column_name": "Ready"
+        }
+    }
+    body_bytes = json.dumps(payload).encode("utf-8")
+    signature = make_signature(body_bytes)
+
+    headers = {
+        "X-Hub-Signature-256": signature,
+        "X-GitHub-Event": "project_card",
+        "X-GitHub-Delivery": "delivery-project-card-ready-001",
+        "Content-Type": "application/json",
+    }
+
+    response = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
+    assert response.status_code == 202
+    data = response.json()
+    assert data["status"] == "PENDING"
+
+
+async def test_webhook_project_card_ignored(async_client, db_session, make_signature):
+    """[P1] Evento project_card com column_name Backlog persiste como IGNORED."""
+    payload = {
+        "action": "moved",
+        "project_card": {
+            "id": 124,
+            "column_name": "Backlog"
+        }
+    }
+    body_bytes = json.dumps(payload).encode("utf-8")
+    signature = make_signature(body_bytes)
+
+    headers = {
+        "X-Hub-Signature-256": signature,
+        "X-GitHub-Event": "project_card",
+        "X-GitHub-Delivery": "delivery-project-card-ignored-001",
+        "Content-Type": "application/json",
+    }
+
+    response = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
+    assert response.status_code == 202
+    data = response.json()
+    assert data["status"] == "IGNORED"
+
+
+async def test_webhook_event_type_workflow_run_ignored_when_not_ready(async_client, db_session, make_signature):
+    """[P1] Evento workflow_run sem flag Ready persiste como IGNORED."""
     body_bytes = b'{"action": "completed", "workflow_run": {"id": 99}}'
     signature = make_signature(body_bytes)
 
@@ -197,11 +367,30 @@ async def test_webhook_event_type_workflow_run(async_client, db_session, make_si
     assert response.status_code == 202
     data = response.json()
     assert data["event_type"] == "workflow_run"
+    assert data["status"] == "IGNORED"
+
+
+async def test_webhook_event_type_workflow_run_pending_when_ready(async_client, db_session, make_signature):
+    """[P1] Evento workflow_run com status Ready persiste como PENDING."""
+    body_bytes = b'{"action": "completed", "status": "Ready", "workflow_run": {"id": 99}}'
+    signature = make_signature(body_bytes)
+
+    headers = {
+        "X-Hub-Signature-256": signature,
+        "X-GitHub-Event": "workflow_run",
+        "X-GitHub-Delivery": "delivery-workflow-run-ready-001",
+        "Content-Type": "application/json",
+    }
+
+    response = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
+    assert response.status_code == 202
+    data = response.json()
+    assert data["event_type"] == "workflow_run"
     assert data["status"] == "PENDING"
 
 
 async def test_webhook_default_event_type_when_header_absent(async_client, db_session, make_signature):
-    """[P1] Quando X-GitHub-Event ausente, event_type deve ser 'unknown'."""
+    """[P1] Quando X-GitHub-Event ausente, event_type deve ser 'unknown' e status 'IGNORED'."""
     body_bytes = b'{"action": "ping"}'
     signature = make_signature(body_bytes)
 
@@ -209,20 +398,19 @@ async def test_webhook_default_event_type_when_header_absent(async_client, db_se
         "X-Hub-Signature-256": signature,
         "X-GitHub-Delivery": "delivery-no-event-header-001",
         "Content-Type": "application/json",
-        # X-GitHub-Event deliberadamente ausente
     }
 
     response = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
     assert response.status_code == 202
     data = response.json()
     assert data["event_type"] == "unknown"
+    assert data["status"] == "IGNORED"
 
 
 async def test_webhook_response_includes_id_field(async_client, db_session, make_signature):
     """[P1] A resposta de persistência bem-sucedida deve incluir o campo 'id'."""
-    import json as _json
-    payload = {"action": "labeled", "label": {"name": "AI Dev"}}
-    body_bytes = _json.dumps(payload).encode("utf-8")
+    payload = {"action": "labeled", "label": {"name": "AI Dev"}, "status": "Ready"}
+    body_bytes = json.dumps(payload).encode("utf-8")
     signature = make_signature(body_bytes)
 
     headers = {
@@ -243,9 +431,8 @@ async def test_webhook_idempotency_determined_by_event_id_not_event_type(
     async_client, db_session, make_signature
 ):
     """[P1] Idempotência baseia-se apenas em event_id; event_type diferente não importa."""
-    import json as _json
-    payload = {"action": "opened"}
-    body_bytes = _json.dumps(payload).encode("utf-8")
+    payload = {"action": "opened", "status": "Ready"}
+    body_bytes = json.dumps(payload).encode("utf-8")
     signature = make_signature(body_bytes)
 
     shared_delivery = "delivery-same-id-diff-type-999"
@@ -278,10 +465,9 @@ async def test_webhook_idempotency_determined_by_event_id_not_event_type(
 
 
 async def test_webhook_issue_comment_event(async_client, db_session, make_signature):
-    """[P1] Evento issue_comment é aceito e persistido corretamente."""
-    import json as _json
+    """[P1] Evento issue_comment sem Ready é aceito e persistido como IGNORED."""
     payload = {"action": "created", "comment": {"body": "LGTM"}}
-    body_bytes = _json.dumps(payload).encode("utf-8")
+    body_bytes = json.dumps(payload).encode("utf-8")
     signature = make_signature(body_bytes)
 
     headers = {
@@ -295,7 +481,7 @@ async def test_webhook_issue_comment_event(async_client, db_session, make_signat
     assert response.status_code == 202
     data = response.json()
     assert data["event_type"] == "issue_comment"
-    assert data["status"] == "PENDING"
+    assert data["status"] == "IGNORED"
 
 
 async def test_healthz_returns_ok_structure(async_client):
