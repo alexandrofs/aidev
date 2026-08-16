@@ -95,9 +95,14 @@ class EventRepository:
                 WHERE events.id = eligible.id
                 RETURNING events.id, events.event_id, events.event_type, events.status, events.payload, events.retry_count, events.created_at, events.updated_at;
             """).bindparams(bindparam("event_types", type_=ARRAY(String)))
-            result = await self.session.execute(query, {"event_types": event_types})
-            row = result.fetchone()
+            try:
+                result = await self.session.execute(query, {"event_types": event_types})
+                row = result.fetchone()
+            except Exception:
+                await self.session.rollback()
+                raise
             if not row:
+                await self.session.rollback()
                 return None
 
             payload_dict = row.payload if isinstance(row.payload, dict) else json.loads(row.payload)
@@ -130,9 +135,11 @@ class EventRepository:
                 row = result.fetchone()
             except Exception as exc:
                 logger.warning("SQL execution in claim_event fallback failed: %s", exc)
+                await self.session.rollback()
                 row = None
 
             if not row:
+                await self.session.rollback()
                 return None
 
             payload_dict = row.payload if isinstance(row.payload, dict) else json.loads(row.payload)
@@ -148,16 +155,20 @@ class EventRepository:
             )
 
         # Audit Log
-        await self.add_audit_log(
-            event_id=event_rec.event_id,
-            action="CLAIMED",
-            actor=worker_id,
-            details={"event_type": event_rec.event_type},
-            auto_commit=False
-        )
-        if auto_commit:
-            await self.session.commit()
-        return event_rec
+        try:
+            await self.add_audit_log(
+                event_id=event_rec.event_id,
+                action="CLAIMED",
+                actor=worker_id,
+                details={"event_type": event_rec.event_type},
+                auto_commit=False
+            )
+            if auto_commit:
+                await self.session.commit()
+            return event_rec
+        except Exception:
+            await self.session.rollback()
+            raise
 
     async def complete_event(
         self,
@@ -319,11 +330,11 @@ class EventRepository:
         )
 
         if is_postgres and event_id:
-            # PostgreSQL: UPSERT — ON CONFLICT (story_id, memory_type, event_id)
+            # PostgreSQL: UPSERT — ON CONFLICT (story_id, memory_type, event_id) WHERE event_id IS NOT NULL
             stmt = text("""
                 INSERT INTO agent_memory (id, story_id, memory_type, content, event_id, created_at, updated_at)
                 VALUES (:id, :story_id, :memory_type, :content, :event_id, :created_at, :updated_at)
-                ON CONFLICT ON CONSTRAINT uq_agent_memory_story_type_event
+                ON CONFLICT (story_id, memory_type, event_id) WHERE event_id IS NOT NULL
                 DO UPDATE SET
                     content = EXCLUDED.content,
                     updated_at = EXCLUDED.updated_at
