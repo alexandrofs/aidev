@@ -234,7 +234,11 @@ class ExecutorWorker:
             for bcmd in branch_cmds:
                 session.exec(bcmd)
 
-            # 3.1 Carregar manifesto de configuração do repositório alvo (.aidev.yaml / .aidev.json) se existir
+            # 3.1 Injetar MCPs, Skills e Templates de Prompt diretamente dentro do container /workspace
+            if hasattr(session, "inject_context_bundle") and initial_context:
+                session.inject_context_bundle(initial_context)
+
+            # 3.2 Carregar manifesto de configuração do repositório alvo (.aidev.yaml / .aidev.json) se existir
             target_repo_config = self.load_target_repo_config(getattr(session, "temp_dir", None))
             if target_repo_config:
                 logger.info(f"Configuração do repositório alvo detectada: {list(target_repo_config.keys())}")
@@ -251,6 +255,14 @@ class ExecutorWorker:
                         )
                     except Exception as log_err:
                         logger.warning(f"Erro ao registrar audit_log WORKFLOW_PHASE_STARTED: {log_err}")
+
+                # Garantir que o template de prompt específico da fase está presente em /workspace/prompts/<phase>.md
+                try:
+                    prompt_file_src = str(self.settings.resolved_prompts_dir / f"{phase}.md")
+                    if os.path.exists(prompt_file_src) and hasattr(session, "copy_file_to_container"):
+                        session.copy_file_to_container(prompt_file_src, f"/workspace/prompts/{phase}.md")
+                except Exception as p_err:
+                    logger.warning(f"Aviso ao copiar prompt da fase '{phase}': {p_err}")
 
                 # Montar comando do OpenCode para a fase
                 phase_env = self.agent_runner.get_phase_env_vars(phase=phase, story_id=story_id, base_env=env_vars)

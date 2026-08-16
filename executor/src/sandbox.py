@@ -88,6 +88,92 @@ class SandboxSession:
             "container_id": self.id
         }
 
+    def copy_file_to_container(self, src_path: str, dst_path: str) -> bool:
+        """
+        Copia um arquivo local diretamente para dentro do volume do container usando a API do Docker (docker cp).
+        """
+        if self.closed:
+            raise RuntimeError("Tentativa de copiar arquivo em SandboxSession já encerrada.")
+
+        if not os.path.exists(src_path):
+            logger.warning(f"Arquivo de origem não encontrado para cópia: {src_path}")
+            return False
+
+        if hasattr(self.container, "put_archive"):
+            try:
+                import io, tarfile
+                dst_dir = os.path.dirname(dst_path) or "/"
+                dst_name = os.path.basename(dst_path)
+
+                self.exec(f"mkdir -p '{dst_dir}'")
+
+                stream = io.BytesIO()
+                with tarfile.open(fileobj=stream, mode="w") as tar:
+                    tar.add(src_path, arcname=dst_name)
+                stream.seek(0)
+
+                return self.container.put_archive(dst_dir, stream.getvalue())
+            except Exception as e:
+                logger.error(f"Erro ao copiar arquivo {src_path} para o container: {e}")
+                return False
+        return True
+
+    def copy_directory_to_container(self, src_dir: str, dst_dir: str) -> bool:
+        """
+        Copia um diretório inteiro local diretamente para o volume do container usando a API do Docker (docker cp).
+        """
+        if self.closed:
+            raise RuntimeError("Tentativa de copiar diretório em SandboxSession já encerrada.")
+
+        if not os.path.exists(src_dir) or not os.path.isdir(src_dir):
+            logger.warning(f"Diretório de origem não encontrado para cópia: {src_dir}")
+            return False
+
+        if hasattr(self.container, "put_archive"):
+            try:
+                import io, tarfile
+                self.exec(f"mkdir -p '{dst_dir}'")
+
+                stream = io.BytesIO()
+                with tarfile.open(fileobj=stream, mode="w") as tar:
+                    for root, _, files in os.walk(src_dir):
+                        for file in files:
+                            full_path = os.path.join(root, file)
+                            rel_path = os.path.relpath(full_path, src_dir)
+                            tar.add(full_path, arcname=rel_path)
+                stream.seek(0)
+
+                return self.container.put_archive(dst_dir, stream.getvalue())
+            except Exception as e:
+                logger.error(f"Erro ao copiar diretório {src_dir} para o container: {e}")
+                return False
+        return True
+
+    def inject_context_bundle(self, context_bundle: Dict[str, Any]) -> None:
+        """
+        Copia diretórios e arquivos de templates de prompt, MCPs e Skills
+        diretamente para o volume do container em /workspace.
+        """
+        if not context_bundle or not isinstance(context_bundle, dict):
+            return
+
+        settings_obj = getattr(self.manager, "settings", global_settings) if self.manager else global_settings
+
+        # 1. Copiar diretório de Prompts para /workspace/prompts
+        prompts_dir = str(settings_obj.resolved_prompts_dir)
+        if os.path.exists(prompts_dir) and os.path.isdir(prompts_dir):
+            self.copy_directory_to_container(prompts_dir, f"{self.working_dir}/prompts")
+
+        # 2. Copiar diretório de Skills para /workspace/.agents/skills
+        skills_dir = str(settings_obj.resolved_skills_dir)
+        if os.path.exists(skills_dir) and os.path.isdir(skills_dir):
+            self.copy_directory_to_container(skills_dir, f"{self.working_dir}/.agents/skills")
+
+        # 3. Copiar MCP Config para /workspace/mcp_config.json
+        mcp_path = str(settings_obj.resolved_mcp_config_path)
+        if os.path.exists(mcp_path) and os.path.isfile(mcp_path):
+            self.copy_file_to_container(mcp_path, f"{self.working_dir}/mcp_config.json")
+
     def close(self) -> None:
         """Encerra e destrói completamente o container e arquivos temporários."""
         if not self.closed:
