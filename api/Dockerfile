@@ -5,8 +5,10 @@ WORKDIR /app
 # Install curl for healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 
+ENV PIP_DEFAULT_TIMEOUT=100
+
 COPY pyproject.toml /app/
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --default-timeout=100 .
 
 COPY src /app/src
 

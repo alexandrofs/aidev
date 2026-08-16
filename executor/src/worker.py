@@ -85,6 +85,11 @@ class ExecutorWorker:
                 break
             except Exception as e:
                 logger.error(f"Exceção no loop de consumo do worker: {e}", exc_info=True)
+                if hasattr(self.repo, "session") and self.repo.session:
+                    try:
+                        await self.repo.session.rollback()
+                    except Exception:
+                        pass
                 await asyncio.sleep(self.current_poll_interval)
 
     async def _process_event(self, event: EventRecord) -> None:
