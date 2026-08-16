@@ -50,12 +50,16 @@ def mock_sandbox(mock_session):
 
 
 @pytest.fixture
-def settings():
+def settings(monkeypatch):
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     return ExecutorSettings(
         POLL_INTERVAL=0.01,
         MAX_POLL_INTERVAL=0.1,
         BACKOFF_FACTOR=2.0,
-        WORKER_ID="test-worker-1"
+        WORKER_ID="test-worker-1",
+        GITHUB_REPOSITORY=None,
+        GITHUB_TOKEN=None
     )
 
 
