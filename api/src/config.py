@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -5,6 +6,7 @@ class Settings(BaseSettings):
     GITHUB_WEBHOOK_SECRET: str = "default_secret"
     GITHUB_TOKEN: str = ""
     GITHUB_API_URL: str = "https://api.github.com"
+    DEFAULT_GITHUB_REPOSITORY: Optional[str] = None
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_DB: str = "aidev"

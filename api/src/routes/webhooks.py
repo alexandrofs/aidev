@@ -5,9 +5,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
+from ..config import settings
 from ..database import get_async_session
 from ..security import validate_github_signature
 from ..services.triage import classify_event_status
+from ..services.github_resolver import resolve_repository_from_event
 
 router = APIRouter()
 
@@ -33,19 +35,33 @@ async def receive_github_webhook(
     except Exception:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON payload")
 
+    # Resolução obrigatória de repositório alvo
+    repository = await resolve_repository_from_event(
+        event_type=event_type,
+        payload=payload,
+        token=settings.GITHUB_TOKEN,
+        api_url=settings.GITHUB_API_URL
+    )
+    if not repository:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Repository could not be resolved for event"
+        )
+
     initial_status = await classify_event_status(event_type=event_type, payload=payload)
 
     try:
         stmt = text("""
-            INSERT INTO events (event_id, event_type, status, payload, retry_count)
-            VALUES (:event_id, :event_type, :status, :payload, 0)
-            RETURNING id, event_id, event_type, status
+            INSERT INTO events (event_id, event_type, status, payload, repository, retry_count)
+            VALUES (:event_id, :event_type, :status, :payload, :repository, 0)
+            RETURNING id, event_id, event_type, status, repository
         """)
         result = await session.execute(stmt, {
             "event_id": event_id,
             "event_type": event_type,
             "status": initial_status,
-            "payload": json.dumps(payload)
+            "payload": json.dumps(payload),
+            "repository": repository
         })
         await session.commit()
         row = result.fetchone()
@@ -54,21 +70,24 @@ async def receive_github_webhook(
             "id": str(row.id) if row else None,
             "event_id": row.event_id if row else event_id,
             "event_type": row.event_type if row else event_type,
-            "status": row.status if row else initial_status
+            "status": row.status if row else initial_status,
+            "repository": getattr(row, "repository", None) or repository
         }
     except IntegrityError:
         await session.rollback()
         res = await session.execute(
-            text("SELECT id, status FROM events WHERE event_id = :event_id"),
+            text("SELECT id, status, repository FROM events WHERE event_id = :event_id"),
             {"event_id": event_id}
         )
         existing_row = res.fetchone()
         current_status = existing_row.status if existing_row else "PENDING"
         existing_id = str(existing_row.id) if existing_row else None
+        existing_repo = getattr(existing_row, "repository", None) if existing_row else None
         return {
             "message": "Event already processed (idempotent duplicate)",
             "id": existing_id,
             "event_id": event_id,
             "event_type": event_type,
-            "status": current_status
+            "status": current_status,
+            "repository": existing_repo or repository
         }

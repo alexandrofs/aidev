@@ -69,6 +69,7 @@ async def async_engine():
                 event_type TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'PENDING',
                 payload TEXT NOT NULL,
+                repository TEXT,
                 retry_count INTEGER NOT NULL DEFAULT 0,
                 error_log TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -112,8 +113,8 @@ async def test_claim_event_success(session: AsyncSession):
     repo = EventRepository(session)
     
     await session.execute(text("""
-        INSERT INTO events (id, event_id, event_type, status, payload, retry_count)
-        VALUES ('uuid-1', 'evt-100', 'push', 'PENDING', '{"ref": "refs/heads/main"}', 0)
+        INSERT INTO events (id, event_id, event_type, status, payload, repository, retry_count)
+        VALUES ('uuid-1', 'evt-100', 'push', 'PENDING', '{"ref": "refs/heads/main"}', 'owner/repo-1', 0)
     """))
     await session.commit()
     
@@ -121,12 +122,42 @@ async def test_claim_event_success(session: AsyncSession):
     assert event is not None
     assert event.event_id == "evt-100"
     assert event.status == "PROCESSING"
+    assert event.repository == "owner/repo-1"
     
     result = await session.execute(text("SELECT * FROM audit_logs WHERE event_id = 'evt-100'"))
     log = result.fetchone()
     assert log is not None
     assert log.action == "CLAIMED"
     assert log.actor == "worker-1"
+
+
+@pytest.mark.asyncio
+async def test_claim_event_with_repository_filter(session: AsyncSession):
+    repo = EventRepository(session)
+
+    await session.execute(text("""
+        INSERT INTO events (id, event_id, event_type, status, payload, repository, retry_count)
+        VALUES 
+            ('uuid-repo-1', 'evt-repo-1', 'issues', 'PENDING', '{"action": "opened"}', 'org/app-a', 0),
+            ('uuid-repo-2', 'evt-repo-2', 'issues', 'PENDING', '{"action": "opened"}', 'org/app-b', 0)
+    """))
+    await session.commit()
+
+    # Claim com filtro para app-b
+    event_b = await repo.claim_event(event_types=["issues"], worker_id="worker-b", repository="org/app-b")
+    assert event_b is not None
+    assert event_b.event_id == "evt-repo-2"
+    assert event_b.repository == "org/app-b"
+
+    # Claim com filtro de lista
+    event_a = await repo.claim_event(event_types=["issues"], worker_id="worker-a", repository=["org/app-a", "org/other"])
+    assert event_a is not None
+    assert event_a.event_id == "evt-repo-1"
+    assert event_a.repository == "org/app-a"
+
+    # Nenhum evento restante para esse repositório
+    event_none = await repo.claim_event(event_types=["issues"], worker_id="worker-b", repository="org/app-b")
+    assert event_none is None
 
 
 @pytest.mark.asyncio

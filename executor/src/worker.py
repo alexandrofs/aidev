@@ -21,6 +21,20 @@ from persistence.src.repository import EventRepository, EventRecord
 logger = logging.getLogger(__name__)
 
 
+def extract_story_id_from_issue(issue_data: Dict[str, Any], fallback_id: str) -> str:
+    """
+    Extrai o identificador da história a partir da descrição (body) da issue.
+    Busca por padrões como 'Story Key: 5-2-time-to-goal-motivational-clock' ou 'Story: 5-2-...'.
+    Caso não encontre, utiliza o fallback 'issue-<number>' ou 'issue-<id>'.
+    """
+    body = issue_data.get("body") or ""
+    match = re.search(r"(?:Story\s*Key|Story):\s*([a-zA-Z0-9_\-\.]+)", body, re.IGNORECASE)
+    if match:
+        return match.group(1).strip().rstrip(".")
+    issue_num = issue_data.get("number") or issue_data.get("id") or fallback_id
+    return f"issue-{issue_num}"
+
+
 class ExecutorWorker:
     """
     Worker assíncrono de consumo e orquestração de sessões de sandbox Docker.
@@ -143,26 +157,33 @@ class ExecutorWorker:
         image = payload.get("image", self.settings.SANDBOX_IMAGE)
         env_vars = payload.get("env_vars", None)
         entrypoint = payload.get("entrypoint", None)
-        story_id = payload.get("story_id", event.event_id)
-        raw_repo = payload.get("repository") or payload.get("repo")
-        if isinstance(raw_repo, dict):
-            repo_name = raw_repo.get("full_name") or raw_repo.get("name")
-        elif isinstance(raw_repo, str):
-            repo_name = raw_repo
+
+        # 0. Resolução prioritária do repositório: event.repository -> payload.repository -> settings.GITHUB_REPOSITORY
+        if getattr(event, "repository", None) and isinstance(event.repository, str) and event.repository.strip():
+            repo_name = event.repository.strip()
         else:
-            repo_name = getattr(self.settings, "GITHUB_REPOSITORY", None)
+            raw_repo = payload.get("repository") or payload.get("repo")
+            if isinstance(raw_repo, dict):
+                repo_name = raw_repo.get("full_name") or raw_repo.get("name_with_owner") or raw_repo.get("name")
+            elif isinstance(raw_repo, str) and raw_repo.strip():
+                repo_name = raw_repo.strip()
+            else:
+                repo_name = getattr(self.settings, "GITHUB_REPOSITORY", None)
         token = getattr(self.settings, "GITHUB_TOKEN", None)
 
         # Extrair dados de eventos nativos do GitHub (issues / projects_v2_item)
-        if "issue" in payload and isinstance(payload["issue"], dict):
-            issue_data = payload["issue"]
-            story_id = payload.get("story_id") or f"ISSUE-{issue_data.get('number', event.event_id)}"
-        elif "projects_v2_item" in payload and isinstance(payload["projects_v2_item"], dict):
-            pv2_data = payload["projects_v2_item"]
-            story_id = payload.get("story_id") or f"PV2-{pv2_data.get('id', event.event_id)}"
+        story_id = payload.get("story_id")
+        if not story_id:
+            if "issue" in payload and isinstance(payload["issue"], dict):
+                issue_data = payload["issue"]
+                story_id = extract_story_id_from_issue(issue_data, fallback_id=event.event_id)
+            elif "projects_v2_item" in payload and isinstance(payload["projects_v2_item"], dict):
+                pv2_data = payload["projects_v2_item"]
+                story_id = f"PV2-{pv2_data.get('id', event.event_id)}"
+            else:
+                story_id = event.event_id
 
-        clean_story = re.sub(r"^story-?", "", str(story_id).strip(), flags=re.IGNORECASE).strip()
-        head_branch = payload.get("head_branch") or payload.get("branch") or f"feature/story-{clean_story}"
+        head_branch = payload.get("head_branch") or payload.get("branch") or f"feature/{story_id}"
         base_branch = payload.get("base_branch") or getattr(self.settings, "GITHUB_BASE_BRANCH", "main")
 
         raw_phases = payload.get("phases")

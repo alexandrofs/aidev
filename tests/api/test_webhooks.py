@@ -1,11 +1,16 @@
 import json
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch, AsyncMock, MagicMock
 import pytest
 from sqlalchemy import text
 
 
 async def test_webhook_valid_signature_and_persistence(async_client, db_session, make_signature):
-    payload = {"action": "edited", "issue": {"number": 42}, "status": "Ready"}
+    payload = {
+        "action": "edited",
+        "issue": {"number": 42},
+        "status": "Ready",
+        "repository": {"full_name": "owner/repo"}
+    }
     body_bytes = json.dumps(payload).encode("utf-8")
     signature = make_signature(body_bytes)
 
@@ -23,10 +28,11 @@ async def test_webhook_valid_signature_and_persistence(async_client, db_session,
     assert data["event_id"] == "delivery-uuid-12345"
     assert data["event_type"] == "issues"
     assert data["status"] == "PENDING"
+    assert data["repository"] == "owner/repo"
 
     # Verify persistence in DB
     result = await db_session.execute(
-        text("SELECT event_id, event_type, status, payload FROM events WHERE event_id = :event_id"),
+        text("SELECT event_id, event_type, status, repository, payload FROM events WHERE event_id = :event_id"),
         {"event_id": "delivery-uuid-12345"}
     )
     row = result.fetchone()
@@ -34,11 +40,12 @@ async def test_webhook_valid_signature_and_persistence(async_client, db_session,
     assert row.event_id == "delivery-uuid-12345"
     assert row.event_type == "issues"
     assert row.status == "PENDING"
+    assert row.repository == "owner/repo"
     assert json.loads(row.payload) == payload
 
 
 async def test_webhook_missing_signature(async_client):
-    body_bytes = b'{"action": "test"}'
+    body_bytes = b'{"action": "test", "repository": "owner/repo"}'
     headers = {
         "X-GitHub-Event": "ping",
         "X-GitHub-Delivery": "delivery-uuid-missing-sig"
@@ -50,7 +57,7 @@ async def test_webhook_missing_signature(async_client):
 
 
 async def test_webhook_invalid_signature(async_client):
-    body_bytes = b'{"action": "test"}'
+    body_bytes = b'{"action": "test", "repository": "owner/repo"}'
     headers = {
         "X-Hub-Signature-256": "sha256=invalid1234567890abcdef",
         "X-GitHub-Event": "ping",
@@ -64,7 +71,7 @@ async def test_webhook_invalid_signature(async_client):
 
 async def test_webhook_malformed_signature_no_prefix(async_client):
     """Assinatura sem prefixo sha256= deve ser rejeitada com HTTP 401."""
-    body_bytes = b'{"action": "test"}'
+    body_bytes = b'{"action": "test", "repository": "owner/repo"}'
     headers = {
         "X-Hub-Signature-256": "invalidformat_without_sha256_prefix",
         "X-GitHub-Event": "ping",
@@ -109,7 +116,7 @@ async def test_webhook_empty_body(async_client, make_signature):
 
 async def test_webhook_missing_delivery_header(async_client, make_signature):
     """Ausencia do header X-GitHub-Delivery deve retornar HTTP 400."""
-    payload = {"action": "test"}
+    payload = {"action": "test", "repository": "owner/repo"}
     body_bytes = json.dumps(payload).encode("utf-8")
     signature = make_signature(body_bytes)
 
@@ -126,7 +133,7 @@ async def test_webhook_missing_delivery_header(async_client, make_signature):
 
 
 async def test_webhook_idempotent_ingestion(async_client, db_session, make_signature):
-    payload = {"action": "opened", "status": "Ready"}
+    payload = {"action": "opened", "status": "Ready", "repository": "owner/repo"}
     body_bytes = json.dumps(payload).encode("utf-8")
     signature = make_signature(body_bytes)
 
@@ -145,6 +152,7 @@ async def test_webhook_idempotent_ingestion(async_client, db_session, make_signa
     assert res1.status_code == 202
     assert res1.json()["message"] == "Event received and persisted"
     assert res1.json()["status"] == "PENDING"
+    assert res1.json()["repository"] == "owner/repo"
 
     # Second duplicate request
     res2 = await async_client.post(
@@ -160,12 +168,14 @@ async def test_webhook_idempotent_ingestion(async_client, db_session, make_signa
     assert res2.json()["message"] == "Event already processed (idempotent duplicate)"
     assert res2.json()["event_id"] == "delivery-duplicate-uuid-999"
     assert res2.json()["status"] == "PENDING"
+    assert res2.json()["repository"] == "owner/repo"
 
 
 async def test_webhook_event_type_projects_v2_item_ready(async_client, db_session, make_signature):
     """[P1] Aceita evento projects_v2_item com status Ready e persiste como PENDING."""
     payload = {
         "action": "edited",
+        "repository": "owner/project-repo",
         "changes": {
             "field_value": {
                 "field_name": "Status",
@@ -188,21 +198,24 @@ async def test_webhook_event_type_projects_v2_item_ready(async_client, db_sessio
     data = response.json()
     assert data["event_type"] == "projects_v2_item"
     assert data["status"] == "PENDING"
+    assert data["repository"] == "owner/project-repo"
 
     result = await db_session.execute(
-        text("SELECT event_type, status FROM events WHERE event_id = :event_id"),
+        text("SELECT event_type, status, repository FROM events WHERE event_id = :event_id"),
         {"event_id": "delivery-projects-v2-item-ready-001"},
     )
     row = result.fetchone()
     assert row is not None
     assert row.event_type == "projects_v2_item"
     assert row.status == "PENDING"
+    assert row.repository == "owner/project-repo"
 
 
 async def test_webhook_event_type_projects_v2_item_ignored(async_client, db_session, make_signature):
     """[P1] Evento projects_v2_item com status Todo é persistido como IGNORED."""
     payload = {
         "action": "edited",
+        "repository": "owner/project-repo",
         "changes": {
             "field_value": {
                 "field_name": "Status",
@@ -225,18 +238,21 @@ async def test_webhook_event_type_projects_v2_item_ignored(async_client, db_sess
     data = response.json()
     assert data["event_type"] == "projects_v2_item"
     assert data["status"] == "IGNORED"
+    assert data["repository"] == "owner/project-repo"
 
     result = await db_session.execute(
-        text("SELECT event_type, status FROM events WHERE event_id = :event_id"),
+        text("SELECT event_type, status, repository FROM events WHERE event_id = :event_id"),
         {"event_id": "delivery-projects-v2-item-ignored-001"},
     )
     row = result.fetchone()
     assert row is not None
+    assert row.event_type == "projects_v2_item"
     assert row.status == "IGNORED"
+    assert row.repository == "owner/project-repo"
 
 
 async def test_webhook_projects_v2_item_reordered_graphql_ready(async_client, db_session, make_signature):
-    """[P1] Evento projects_v2_item reordered resolve status Ready via GraphQL e persiste como PENDING."""
+    """[P1] Evento projects_v2_item reordered resolve status Ready e repository via GraphQL e persiste como PENDING."""
     payload = {
         "action": "reordered",
         "projects_v2_item": {
@@ -260,12 +276,15 @@ async def test_webhook_projects_v2_item_reordered_graphql_ready(async_client, db
         "Content-Type": "application/json",
     }
 
-    with patch("src.services.triage.fetch_project_item_status_graphql", new=AsyncMock(return_value="Ready")):
-        with patch("src.services.triage.settings.GITHUB_TOKEN", "mock-token"):
-            response = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
-            assert response.status_code == 202
-            data = response.json()
-            assert data["status"] == "PENDING"
+    with patch("src.services.triage.fetch_project_item_status_graphql", new=AsyncMock(return_value="Ready")), \
+         patch("src.services.github_resolver.fetch_repository_from_node_graphql", new=AsyncMock(return_value="resolved-owner/resolved-repo")), \
+         patch("src.services.triage.settings.GITHUB_TOKEN", "mock-token"), \
+         patch("src.services.github_resolver.settings.GITHUB_TOKEN", "mock-token"):
+        response = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
+        assert response.status_code == 202
+        data = response.json()
+        assert data["status"] == "PENDING"
+        assert data["repository"] == "resolved-owner/resolved-repo"
 
 
 async def test_webhook_projects_v2_item_reordered_graphql_not_ready(async_client, db_session, make_signature):
@@ -293,18 +312,22 @@ async def test_webhook_projects_v2_item_reordered_graphql_not_ready(async_client
         "Content-Type": "application/json",
     }
 
-    with patch("src.services.triage.fetch_project_item_status_graphql", new=AsyncMock(return_value="In Progress")):
-        with patch("src.services.triage.settings.GITHUB_TOKEN", "mock-token"):
-            response = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
-            assert response.status_code == 202
-            data = response.json()
-            assert data["status"] == "IGNORED"
+    with patch("src.services.triage.fetch_project_item_status_graphql", new=AsyncMock(return_value="In Progress")), \
+         patch("src.services.github_resolver.fetch_repository_from_node_graphql", new=AsyncMock(return_value="org/repo")), \
+         patch("src.services.triage.settings.GITHUB_TOKEN", "mock-token"), \
+         patch("src.services.github_resolver.settings.GITHUB_TOKEN", "mock-token"):
+        response = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
+        assert response.status_code == 202
+        data = response.json()
+        assert data["status"] == "IGNORED"
+        assert data["repository"] == "org/repo"
 
 
 async def test_webhook_project_card_ready(async_client, db_session, make_signature):
     """[P1] Evento project_card com column_name Ready persiste como PENDING."""
     payload = {
         "action": "moved",
+        "repository": "org/card-repo",
         "project_card": {
             "id": 123,
             "column_name": "Ready"
@@ -324,12 +347,14 @@ async def test_webhook_project_card_ready(async_client, db_session, make_signatu
     assert response.status_code == 202
     data = response.json()
     assert data["status"] == "PENDING"
+    assert data["repository"] == "org/card-repo"
 
 
 async def test_webhook_project_card_ignored(async_client, db_session, make_signature):
     """[P1] Evento project_card com column_name Backlog persiste como IGNORED."""
     payload = {
         "action": "moved",
+        "repository": "org/card-repo",
         "project_card": {
             "id": 124,
             "column_name": "Backlog"
@@ -353,7 +378,7 @@ async def test_webhook_project_card_ignored(async_client, db_session, make_signa
 
 async def test_webhook_event_type_workflow_run_ignored_when_not_ready(async_client, db_session, make_signature):
     """[P1] Evento workflow_run sem flag Ready persiste como IGNORED."""
-    body_bytes = b'{"action": "completed", "workflow_run": {"id": 99}}'
+    body_bytes = b'{"action": "completed", "repository": "org/repo", "workflow_run": {"id": 99}}'
     signature = make_signature(body_bytes)
 
     headers = {
@@ -372,7 +397,7 @@ async def test_webhook_event_type_workflow_run_ignored_when_not_ready(async_clie
 
 async def test_webhook_event_type_workflow_run_pending_when_ready(async_client, db_session, make_signature):
     """[P1] Evento workflow_run com status Ready persiste como PENDING."""
-    body_bytes = b'{"action": "completed", "status": "Ready", "workflow_run": {"id": 99}}'
+    body_bytes = b'{"action": "completed", "status": "Ready", "repository": "org/repo", "workflow_run": {"id": 99}}'
     signature = make_signature(body_bytes)
 
     headers = {
@@ -391,7 +416,7 @@ async def test_webhook_event_type_workflow_run_pending_when_ready(async_client, 
 
 async def test_webhook_default_event_type_when_header_absent(async_client, db_session, make_signature):
     """[P1] Quando X-GitHub-Event ausente, event_type deve ser 'unknown' e status 'IGNORED'."""
-    body_bytes = b'{"action": "ping"}'
+    body_bytes = b'{"action": "ping", "repository": "org/repo"}'
     signature = make_signature(body_bytes)
 
     headers = {
@@ -409,7 +434,7 @@ async def test_webhook_default_event_type_when_header_absent(async_client, db_se
 
 async def test_webhook_response_includes_id_field(async_client, db_session, make_signature):
     """[P1] A resposta de persistência bem-sucedida deve incluir o campo 'id'."""
-    payload = {"action": "labeled", "label": {"name": "AI Dev"}, "status": "Ready"}
+    payload = {"action": "labeled", "label": {"name": "AI Dev"}, "status": "Ready", "repository": "org/repo"}
     body_bytes = json.dumps(payload).encode("utf-8")
     signature = make_signature(body_bytes)
 
@@ -431,7 +456,7 @@ async def test_webhook_idempotency_determined_by_event_id_not_event_type(
     async_client, db_session, make_signature
 ):
     """[P1] Idempotência baseia-se apenas em event_id; event_type diferente não importa."""
-    payload = {"action": "opened", "status": "Ready"}
+    payload = {"action": "opened", "status": "Ready", "repository": "org/repo"}
     body_bytes = json.dumps(payload).encode("utf-8")
     signature = make_signature(body_bytes)
 
@@ -466,7 +491,7 @@ async def test_webhook_idempotency_determined_by_event_id_not_event_type(
 
 async def test_webhook_issue_comment_event(async_client, db_session, make_signature):
     """[P1] Evento issue_comment sem Ready é aceito e persistido como IGNORED."""
-    payload = {"action": "created", "comment": {"body": "LGTM"}}
+    payload = {"action": "created", "comment": {"body": "LGTM"}, "repository": "org/repo"}
     body_bytes = json.dumps(payload).encode("utf-8")
     signature = make_signature(body_bytes)
 
@@ -482,6 +507,124 @@ async def test_webhook_issue_comment_event(async_client, db_session, make_signat
     data = response.json()
     assert data["event_type"] == "issue_comment"
     assert data["status"] == "IGNORED"
+
+
+# =========================================================================
+# NOVOS TESTES ESPECÍFICOS PARA A HISTÓRIA 1.4
+# =========================================================================
+
+async def test_webhook_native_repository_resolution_variants(async_client, db_session, make_signature):
+    """[AC 2] Extração de repositório nativo com full_name, name_with_owner e string simples."""
+    # 1. Objeto com full_name
+    p1 = {"action": "opened", "status": "Ready", "repository": {"full_name": "acme/awesome-service"}}
+    b1 = json.dumps(p1).encode("utf-8")
+    r1 = await async_client.post(
+        "/webhooks/github", content=b1,
+        headers={"X-Hub-Signature-256": make_signature(b1), "X-GitHub-Event": "issues", "X-GitHub-Delivery": "deliv-repo-var-1"}
+    )
+    assert r1.status_code == 202
+    assert r1.json()["repository"] == "acme/awesome-service"
+
+    # 2. Objeto com name_with_owner
+    p2 = {"action": "opened", "status": "Ready", "repository": {"name_with_owner": "acme/another-app"}}
+    b2 = json.dumps(p2).encode("utf-8")
+    r2 = await async_client.post(
+        "/webhooks/github", content=b2,
+        headers={"X-Hub-Signature-256": make_signature(b2), "X-GitHub-Event": "issues", "X-GitHub-Delivery": "deliv-repo-var-2"}
+    )
+    assert r2.status_code == 202
+    assert r2.json()["repository"] == "acme/another-app"
+
+    # 3. String simples
+    p3 = {"action": "opened", "status": "Ready", "repository": "acme/string-repo"}
+    b3 = json.dumps(p3).encode("utf-8")
+    r3 = await async_client.post(
+        "/webhooks/github", content=b3,
+        headers={"X-Hub-Signature-256": make_signature(b3), "X-GitHub-Event": "issues", "X-GitHub-Delivery": "deliv-repo-var-3"}
+    )
+    assert r3.status_code == 202
+    assert r3.json()["repository"] == "acme/string-repo"
+
+
+async def test_webhook_unresolvable_repository_rejects_with_422(async_client, make_signature):
+    """[AC 4] Webhook sem repositório resolúvel e sem DEFAULT_GITHUB_REPOSITORY deve ser rejeitado com HTTP 422."""
+    payload = {
+        "action": "edited",
+        "projects_v2_item": {
+            "id": 999,
+            "content_type": "DraftIssue",
+            "node_id": "PVTI_draft_123"
+        }
+    }
+    body_bytes = json.dumps(payload).encode("utf-8")
+    signature = make_signature(body_bytes)
+
+    headers = {
+        "X-Hub-Signature-256": signature,
+        "X-GitHub-Event": "projects_v2_item",
+        "X-GitHub-Delivery": "deliv-unresolvable-repo-001",
+        "Content-Type": "application/json"
+    }
+
+    with patch("src.routes.webhooks.settings.DEFAULT_GITHUB_REPOSITORY", None):
+        response = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
+        assert response.status_code == 422
+        assert response.json()["detail"] == "Repository could not be resolved for event"
+
+
+async def test_webhook_fallback_to_default_repository(async_client, db_session, make_signature):
+    """[AC 4] Quando o repositório não vier no payload mas DEFAULT_GITHUB_REPOSITORY estiver configurado, aceita com o padrão."""
+    payload = {"action": "opened", "status": "Ready"}
+    body_bytes = json.dumps(payload).encode("utf-8")
+    signature = make_signature(body_bytes)
+
+    headers = {
+        "X-Hub-Signature-256": signature,
+        "X-GitHub-Event": "issues",
+        "X-GitHub-Delivery": "deliv-default-repo-fallback-001",
+        "Content-Type": "application/json"
+    }
+
+    with patch("src.services.github_resolver.settings.DEFAULT_GITHUB_REPOSITORY", "default-org/default-repo"):
+        response = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
+        assert response.status_code == 202
+        assert response.json()["repository"] == "default-org/default-repo"
+
+
+async def test_webhook_issues_labeled_triaged_as_pending(async_client, db_session, make_signature):
+    """[AC 5] Webhooks de issues com ação labeled devem ser triados como PENDING."""
+    payload = {
+        "action": "labeled",
+        "issue": {"number": 100, "body": "Story Key: 1-4-adicao-coluna-repository"},
+        "label": {"name": "AI Dev"},
+        "repository": "org/project-repo"
+    }
+    body_bytes = json.dumps(payload).encode("utf-8")
+    signature = make_signature(body_bytes)
+
+    headers = {
+        "X-Hub-Signature-256": signature,
+        "X-GitHub-Event": "issues",
+        "X-GitHub-Delivery": "deliv-issues-labeled-pending-001",
+        "Content-Type": "application/json"
+    }
+
+    response = await async_client.post("/webhooks/github", content=body_bytes, headers=headers)
+    assert response.status_code == 202
+    data = response.json()
+    assert data["event_type"] == "issues"
+    assert data["status"] == "PENDING"
+    assert data["repository"] == "org/project-repo"
+
+    # Verificar no banco de dados
+    res = await db_session.execute(
+        text("SELECT status, repository FROM events WHERE event_id = :event_id"),
+        {"event_id": "deliv-issues-labeled-pending-001"}
+    )
+    row = res.fetchone()
+    assert row is not None
+    assert row.status == "PENDING"
+    assert row.repository == "org/project-repo"
 
 
 async def test_healthz_returns_ok_structure(async_client):
@@ -500,3 +643,57 @@ async def test_healthz_ignores_content_type(async_client):
     )
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+async def test_graphql_repository_resolution_project_v2_item_nested():
+    """[AC 3] Resolução de repositório quando node_id for ProjectV2Item com content.repository."""
+    from src.services.github_resolver import fetch_repository_from_node_graphql
+
+    mock_client = AsyncMock()
+    mock_response = MagicMock()
+    mock_response.is_error = False
+    mock_response.json.return_value = {
+        "data": {
+            "node": {
+                "content": {
+                    "repository": {
+                        "nameWithOwner": "nested-org/nested-repo"
+                    }
+                }
+            }
+        }
+    }
+    mock_client.post.return_value = mock_response
+
+    repo = await fetch_repository_from_node_graphql(
+        node_id="PVTI_item_123",
+        token="mock_token",
+        http_client=mock_client
+    )
+    assert repo == "nested-org/nested-repo"
+
+
+async def test_graphql_handles_null_data_gracefully():
+    """[AC 3] Funções GraphQL lidam defensivamente com data: null."""
+    from src.services.github_resolver import fetch_repository_from_node_graphql
+    from src.services.triage import fetch_project_item_status_graphql
+
+    mock_client = AsyncMock()
+    mock_response = MagicMock()
+    mock_response.is_error = False
+    mock_response.json.return_value = {"data": None, "errors": [{"message": "Could not resolve to a node"}]}
+    mock_client.post.return_value = mock_response
+
+    repo = await fetch_repository_from_node_graphql(
+        node_id="PVTI_invalid",
+        token="mock_token",
+        http_client=mock_client
+    )
+    assert repo is None
+
+    status = await fetch_project_item_status_graphql(
+        node_id="PVTI_invalid",
+        token="mock_token",
+        http_client=mock_client
+    )
+    assert status is None
