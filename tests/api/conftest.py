@@ -35,6 +35,7 @@ async def db_engine():
                 status TEXT NOT NULL DEFAULT 'PENDING',
                 payload TEXT NOT NULL,
                 retry_count INTEGER NOT NULL DEFAULT 0,
+                error_log TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )

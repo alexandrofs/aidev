@@ -81,7 +81,7 @@ def test_events_table_schema_and_defaults(migrated_db):
     inspector = inspect(migrated_db)
     columns = {col["name"]: col for col in inspector.get_columns("events")}
     
-    expected_cols = ["id", "event_id", "event_type", "status", "payload", "retry_count", "created_at", "updated_at"]
+    expected_cols = ["id", "event_id", "event_type", "status", "payload", "retry_count", "error_log", "created_at", "updated_at"]
     for col_name in expected_cols:
         assert col_name in columns, f"Column {col_name} missing from events table"
         
@@ -90,7 +90,7 @@ def test_events_table_schema_and_defaults(migrated_db):
             text("""
                 INSERT INTO events (event_id, event_type, payload)
                 VALUES ('evt_test_1', 'push', '{"ref": "refs/heads/main"}'::jsonb)
-                RETURNING id, status, retry_count, created_at, updated_at;
+                RETURNING id, status, retry_count, error_log, created_at, updated_at;
             """)
         )
         row = res.fetchone()
@@ -98,8 +98,32 @@ def test_events_table_schema_and_defaults(migrated_db):
         assert row is not None
         assert row.status == "PENDING"
         assert row.retry_count == 0
+        assert row.error_log is None
         assert row.created_at is not None
         assert row.updated_at is not None
+
+
+def test_migration_004_error_log_upgrade_downgrade(postgres_url):
+    ini_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../persistence/alembic.ini"))
+    alembic_cfg = Config(ini_path)
+    alembic_cfg.set_main_option("sqlalchemy.url", postgres_url)
+
+    engine = create_engine(postgres_url)
+    try:
+        # Downgrade para 003
+        command.downgrade(alembic_cfg, "003_agent_memory_event_id")
+        inspector = inspect(engine)
+        cols_003 = [col["name"] for col in inspector.get_columns("events")]
+        assert "error_log" not in cols_003
+
+        # Upgrade de volta para head (004)
+        command.upgrade(alembic_cfg, "head")
+        inspector = inspect(engine)
+        cols_004 = [col["name"] for col in inspector.get_columns("events")]
+        assert "error_log" in cols_004
+    finally:
+        command.upgrade(alembic_cfg, "head")
+        engine.dispose()
 
 
 def test_events_unique_constraint(migrated_db):

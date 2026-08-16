@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from ..database import get_async_session
 from ..security import validate_github_signature
+from ..services.triage import classify_event_status
 
 router = APIRouter()
 
@@ -32,15 +33,18 @@ async def receive_github_webhook(
     except Exception:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON payload")
 
+    initial_status = await classify_event_status(event_type=event_type, payload=payload)
+
     try:
         stmt = text("""
             INSERT INTO events (event_id, event_type, status, payload, retry_count)
-            VALUES (:event_id, :event_type, 'PENDING', :payload, 0)
+            VALUES (:event_id, :event_type, :status, :payload, 0)
             RETURNING id, event_id, event_type, status
         """)
         result = await session.execute(stmt, {
             "event_id": event_id,
             "event_type": event_type,
+            "status": initial_status,
             "payload": json.dumps(payload)
         })
         await session.commit()
@@ -50,7 +54,7 @@ async def receive_github_webhook(
             "id": str(row.id) if row else None,
             "event_id": row.event_id if row else event_id,
             "event_type": row.event_type if row else event_type,
-            "status": row.status if row else "PENDING"
+            "status": row.status if row else initial_status
         }
     except IntegrityError:
         await session.rollback()

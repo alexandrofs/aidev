@@ -25,6 +25,7 @@ class EventRecord(BaseModel):
     status: str
     payload: Dict[str, Any]
     retry_count: int = 0
+    error_log: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -93,7 +94,7 @@ class EventRepository:
                     updated_at = NOW()
                 FROM eligible
                 WHERE events.id = eligible.id
-                RETURNING events.id, events.event_id, events.event_type, events.status, events.payload, events.retry_count, events.created_at, events.updated_at;
+                RETURNING events.id, events.event_id, events.event_type, events.status, events.payload, events.retry_count, events.created_at, events.updated_at, events.error_log;
             """).bindparams(bindparam("event_types", type_=ARRAY(String)))
             try:
                 result = await self.session.execute(query, {"event_types": event_types})
@@ -113,6 +114,7 @@ class EventRepository:
                 status=row.status,
                 payload=payload_dict,
                 retry_count=row.retry_count,
+                error_log=getattr(row, "error_log", None),
                 created_at=row.created_at,
                 updated_at=row.updated_at
             )
@@ -127,7 +129,7 @@ class EventRepository:
                     ORDER BY created_at ASC
                     LIMIT 1
                 )
-                RETURNING id, event_id, event_type, status, payload, retry_count, created_at, updated_at
+                RETURNING id, event_id, event_type, status, payload, retry_count, created_at, updated_at, error_log
             """).bindparams(bindparam("types", expanding=True))
 
             try:
@@ -135,8 +137,24 @@ class EventRepository:
                 row = result.fetchone()
             except Exception as exc:
                 logger.warning("SQL execution in claim_event fallback failed: %s", exc)
-                await self.session.rollback()
-                row = None
+                # Fallback secundário se coluna error_log não existir em schemas antigos SQLite
+                try:
+                    stmt_legacy = text("""
+                        UPDATE events
+                        SET status = 'PROCESSING', updated_at = CURRENT_TIMESTAMP
+                        WHERE id = (
+                            SELECT id FROM events
+                            WHERE status = 'PENDING' AND event_type IN :types
+                            ORDER BY created_at ASC
+                            LIMIT 1
+                        )
+                        RETURNING id, event_id, event_type, status, payload, retry_count, created_at, updated_at
+                    """).bindparams(bindparam("types", expanding=True))
+                    result_legacy = await self.session.execute(stmt_legacy, {"types": event_types})
+                    row = result_legacy.fetchone()
+                except Exception:
+                    await self.session.rollback()
+                    row = None
 
             if not row:
                 await self.session.rollback()
@@ -150,6 +168,7 @@ class EventRepository:
                 status="PROCESSING",
                 payload=payload_dict,
                 retry_count=row.retry_count,
+                error_log=getattr(row, "error_log", None),
                 created_at=row.created_at,
                 updated_at=row.updated_at
             )
@@ -206,7 +225,7 @@ class EventRepository:
         auto_commit: bool = True
     ) -> bool:
         """
-        Trata falha de evento atomicamente. Incrementa retry_count.
+        Trata falha de evento atomicamente. Incrementa retry_count e grava error_log.
         Se retry_count < max_retries, retorna a PENDING (action: RETRY).
         Caso contrário, define status FAILED (action: FAILED).
         """
@@ -214,14 +233,16 @@ class EventRepository:
             UPDATE events
             SET retry_count = retry_count + 1,
                 status = CASE WHEN (retry_count + 1) < :max_retries THEN 'PENDING' ELSE 'FAILED' END,
+                error_log = :error_message,
                 updated_at = CURRENT_TIMESTAMP
             WHERE event_id = :event_id
-            RETURNING retry_count, status;
+            RETURNING retry_count, status, error_log;
         """)
         
         try:
             res = await self.session.execute(stmt_update, {
                 "event_id": event_id,
+                "error_message": error_message,
                 "max_retries": max_retries
             })
             row = res.fetchone()
@@ -231,13 +252,30 @@ class EventRepository:
                 UPDATE events
                 SET retry_count = retry_count + 1,
                     status = CASE WHEN (retry_count + 1) < :max_retries THEN 'PENDING' ELSE 'FAILED' END,
+                    error_log = :error_message,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE event_id = :event_id
             """)
-            res = await self.session.execute(stmt_fallback, {
-                "event_id": event_id,
-                "max_retries": max_retries
-            })
+            try:
+                res = await self.session.execute(stmt_fallback, {
+                    "event_id": event_id,
+                    "error_message": error_message,
+                    "max_retries": max_retries
+                })
+            except Exception:
+                # Caso a tabela não possua error_log (schemas antigos)
+                stmt_fallback_legacy = text("""
+                    UPDATE events
+                    SET retry_count = retry_count + 1,
+                        status = CASE WHEN (retry_count + 1) < :max_retries THEN 'PENDING' ELSE 'FAILED' END,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE event_id = :event_id
+                """)
+                res = await self.session.execute(stmt_fallback_legacy, {
+                    "event_id": event_id,
+                    "max_retries": max_retries
+                })
+
             if res.rowcount == 0:
                 return False
 

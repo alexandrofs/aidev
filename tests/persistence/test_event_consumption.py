@@ -70,6 +70,7 @@ async def async_engine():
                 status TEXT NOT NULL DEFAULT 'PENDING',
                 payload TEXT NOT NULL,
                 retry_count INTEGER NOT NULL DEFAULT 0,
+                error_log TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -178,10 +179,11 @@ async def test_fail_event_retry(session: AsyncSession):
     
     await repo.fail_event(event_id="evt-103", worker_id="worker-1", error_message="Connection timeout", max_retries=3)
     
-    res = await session.execute(text("SELECT status, retry_count FROM events WHERE event_id = 'evt-103'"))
+    res = await session.execute(text("SELECT status, retry_count, error_log FROM events WHERE event_id = 'evt-103'"))
     row = res.fetchone()
     assert row.status == "PENDING"
     assert row.retry_count == 1
+    assert row.error_log == "Connection timeout"
     
     res_audit = await session.execute(text("SELECT action, details FROM audit_logs WHERE event_id = 'evt-103'"))
     audit_row = res_audit.fetchone()
@@ -201,15 +203,30 @@ async def test_fail_event_max_retries(session: AsyncSession):
     
     await repo.fail_event(event_id="evt-104", worker_id="worker-1", error_message="Fatal error", max_retries=3)
     
-    res = await session.execute(text("SELECT status, retry_count FROM events WHERE event_id = 'evt-104'"))
+    res = await session.execute(text("SELECT status, retry_count, error_log FROM events WHERE event_id = 'evt-104'"))
     row = res.fetchone()
     assert row.status == "FAILED"
     assert row.retry_count == 3
+    assert row.error_log == "Fatal error"
     
     res_audit = await session.execute(text("SELECT action, details FROM audit_logs WHERE event_id = 'evt-104'"))
     audit_row = res_audit.fetchone()
     assert audit_row is not None
     assert audit_row.action == "FAILED"
+
+
+@pytest.mark.asyncio
+async def test_claim_event_ignores_ignored_status(session: AsyncSession):
+    repo = EventRepository(session)
+    
+    await session.execute(text("""
+        INSERT INTO events (id, event_id, event_type, status, payload, retry_count)
+        VALUES ('uuid-ignored-1', 'evt-ignored-1', 'projects_v2_item', 'IGNORED', '{"action": "edited"}', 0)
+    """))
+    await session.commit()
+    
+    claimed = await repo.claim_event(event_types=["projects_v2_item"], worker_id="worker-1")
+    assert claimed is None
 
 
 @pytest.mark.asyncio

@@ -21,3 +21,4 @@ def test_alembic_offline_ddl_generation(capsys):
     assert "CREATE INDEX idx_agent_memory_story_type ON agent_memory (story_id, memory_type)" in output_sql
     assert "CREATE INDEX idx_audit_logs_event_id ON audit_logs (event_id)" in output_sql
     assert "DEFAULT 'PENDING'" in output_sql
+    assert "error_log" in output_sql
