@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 
 import httpx
 
@@ -340,3 +340,76 @@ class GitHubClient:
         finally:
             if should_close:
                 await client.aclose()
+
+    async def create_issue_comment(
+        self,
+        repo: str,
+        issue_number: Union[int, str],
+        body: str
+    ) -> Dict[str, Any]:
+        """
+        Cria um comentário em uma issue no repositório remoto via GitHub REST API v3.
+        POST /repos/{owner}/{repo}/issues/{issue_number}/comments
+        """
+        clean_repo = repo.replace("https://github.com/", "").strip("/").removesuffix(".git").strip("/")
+        clean_issue_num = str(issue_number).strip()
+
+        if self.dry_run:
+            logger.info(f"[DRY RUN] Simulação de comentário na issue #{clean_issue_num} em {clean_repo}: {body[:100]}...")
+            return {
+                "id": 999999,
+                "body": body,
+                "html_url": f"https://github.com/{clean_repo}/issues/{clean_issue_num}#issuecomment-999999",
+                "issue_url": f"https://api.github.com/repos/{clean_repo}/issues/{clean_issue_num}",
+                "dry_run": True
+            }
+
+        if not self.token:
+            raise GitHubAuthError("GitHub token não configurado para criação de comentário em issue")
+
+        url = f"{self.api_url}/repos/{clean_repo}/issues/{clean_issue_num}/comments"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28"
+        }
+        payload = {
+            "body": body
+        }
+
+        client = self._get_client()
+        should_close = (client is not self._http_client)
+        try:
+            logger.info(f"Enviando requisição de comentário na issue para {url}")
+            response = await client.post(url, headers=headers, json=payload)
+
+            if response.status_code in (401, 403):
+                raise GitHubAuthError(
+                    f"Falha de autenticação/autorização ao comentar na issue: {response.text}",
+                    status_code=response.status_code,
+                    response_data=response.text
+                )
+            elif response.is_error:
+                raise GitHubAPIError(
+                    f"Erro retornado pela API do GitHub ao comentar na issue: {response.text}",
+                    status_code=response.status_code,
+                    response_data=response.text
+                )
+
+            data = response.json()
+            return {
+                "id": data.get("id"),
+                "body": data.get("body"),
+                "html_url": data.get("html_url"),
+                "issue_url": data.get("issue_url"),
+                "raw_response": data
+            }
+        except (GitHubAPIError, GitHubAuthError):
+            raise
+        except Exception as exc:
+            logger.error(f"Exceção inesperada ao comentar na issue #{clean_issue_num} no GitHub: {exc}", exc_info=True)
+            raise GitHubAPIError(f"Falha de comunicação com a API do GitHub: {exc}") from exc
+        finally:
+            if should_close:
+                await client.aclose()
+

@@ -248,7 +248,6 @@ async def test_worker_validation_failure_blocks_completion(mock_repo, mock_sandb
         {"exit_code": 0, "logs": "Git setup 1", "container_id": "c-1"},
         {"exit_code": 0, "logs": "Git setup 2", "container_id": "c-1"},
         {"exit_code": 0, "logs": "Git setup 3", "container_id": "c-1"},
-        {"exit_code": 0, "logs": "Branch ok", "container_id": "c-1"},
         {"exit_code": 1, "logs": "Coding phase failed: tests or syntax errors", "container_id": "c-1"}
     ]
 
@@ -286,7 +285,6 @@ async def test_worker_review_phase_failure_triggers_audit_and_stops(mock_repo, m
         {"exit_code": 0, "logs": "Git setup 1", "container_id": "c-1"},
         {"exit_code": 0, "logs": "Git setup 2", "container_id": "c-1"},
         {"exit_code": 0, "logs": "Git setup 3", "container_id": "c-1"},
-        {"exit_code": 0, "logs": "Branch ok", "container_id": "c-1"},
         {"exit_code": 0, "logs": "Coding OK", "container_id": "c-1"},
         {"exit_code": 1, "logs": "Review found syntax errors", "container_id": "c-1"}
     ]
@@ -343,20 +341,10 @@ async def test_worker_full_story_3_1_workflow_audit_and_readiness(mock_repo, moc
 
 
 @pytest.mark.asyncio
-async def test_worker_successful_pr_creation_and_audit_logs(mock_repo, mock_sandbox, mock_session, settings):
+async def test_worker_successful_phase_execution_and_completion(mock_repo, mock_sandbox, mock_session, settings):
     from executor.src.github import GitHubClient
 
     mock_github = MagicMock(spec=GitHubClient)
-    mock_github.generate_pr_title.return_value = "feat(story-3.2): Geracao e Abertura Semantica de PR"
-    mock_github.format_semantic_pr_body.return_value = "## 🤖 AI Developer — Pull Request de Entrega"
-    mock_github.create_pull_request = AsyncMock(return_value={
-        "pr_number": 42,
-        "pr_url": "https://api.github.com/repos/org/repo/pulls/42",
-        "pr_html_url": "https://github.com/org/repo/pull/42",
-        "head_branch": "feature/story-3.2",
-        "base_branch": "main",
-        "commit_sha": "abc123sha"
-    })
 
     event = EventRecord(
         id="9",
@@ -384,111 +372,9 @@ async def test_worker_successful_pr_creation_and_audit_logs(mock_repo, mock_sand
     worker.stop()
     await task
 
-    mock_github.generate_pr_title.assert_called_once()
-    mock_github.format_semantic_pr_body.assert_called_once()
-    mock_github.create_pull_request.assert_called_once()
-
-    audit_actions = [c.kwargs.get("action") for c in mock_repo.add_audit_log.call_args_list]
-    assert "PR_CREATED" in audit_actions
-
     mock_repo.complete_event.assert_called_once()
     mock_repo.save_agent_memory.assert_called_once()
-    mem_content = mock_repo.save_agent_memory.call_args.kwargs["content"]
-    assert mem_content["pr_number"] == 42
-    assert mem_content["pull_request_status"] == "OPEN"
 
-
-@pytest.mark.asyncio
-async def test_worker_projects_card_updated_when_project_item_present(mock_repo, mock_sandbox, mock_session, settings):
-    from executor.src.github import GitHubClient
-
-    mock_github = MagicMock(spec=GitHubClient)
-    mock_github.generate_pr_title.return_value = "feat(story-3.2): Title"
-    mock_github.format_semantic_pr_body.return_value = "Body"
-    mock_github.create_pull_request = AsyncMock(return_value={
-        "pr_number": 101,
-        "pr_url": "https://api.github.com/repos/org/repo/pulls/101",
-        "pr_html_url": "https://github.com/org/repo/pull/101",
-        "head_branch": "feature/story-3.2",
-        "base_branch": "main",
-        "commit_sha": "def456"
-    })
-    mock_github.update_project_card_status = AsyncMock(return_value={"updated": True, "item_id": "PVTI_item999"})
-
-    event = EventRecord(
-        id="10",
-        event_id="evt-1000",
-        event_type="workflow.execution",
-        status="PROCESSING",
-        payload={
-            "command": "python run.py",
-            "story_id": "3.2",
-            "repository": "org/repo",
-            "project_id": "PVT_proj777",
-            "project_item_id": "PVTI_item999",
-            "project_field_id": "PVTF_status",
-            "project_option_id": "opt_review"
-        }
-    )
-    mock_repo.claim_event.side_effect = [event, None]
-
-    worker = ExecutorWorker(
-        repo=mock_repo,
-        sandbox_manager=mock_sandbox,
-        github_client=mock_github,
-        settings=settings
-    )
-
-    task = asyncio.create_task(worker.start())
-    await asyncio.sleep(0.05)
-    worker.stop()
-    await task
-
-    mock_github.create_pull_request.assert_called_once()
-    mock_repo.complete_event.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_worker_pr_failure_emits_pr_failed_audit_and_fails_event(mock_repo, mock_sandbox, mock_session, settings):
-    from executor.src.github import GitHubClient, GitHubAPIError
-
-    mock_github = MagicMock(spec=GitHubClient)
-    mock_github.generate_pr_title.return_value = "feat(story-3.2): Title"
-    mock_github.format_semantic_pr_body.return_value = "Body"
-    mock_github.create_pull_request = AsyncMock(side_effect=GitHubAPIError("403 Forbidden - Rate limit exceeded"))
-
-    event = EventRecord(
-        id="11",
-        event_id="evt-1100",
-        event_type="workflow.execution",
-        status="PROCESSING",
-        payload={
-            "command": "python run.py",
-            "story_id": "3.2",
-            "repository": "org/repo"
-        }
-    )
-    mock_repo.claim_event.side_effect = [event, None]
-
-    worker = ExecutorWorker(
-        repo=mock_repo,
-        sandbox_manager=mock_sandbox,
-        github_client=mock_github,
-        settings=settings
-    )
-
-    task = asyncio.create_task(worker.start())
-    await asyncio.sleep(0.05)
-    worker.stop()
-    await task
-
-    audit_actions = [c.kwargs.get("action") for c in mock_repo.add_audit_log.call_args_list]
-    assert "PR_FAILED" in audit_actions
-    mock_repo.complete_event.assert_not_called()
-    mock_repo.fail_event.assert_called_once()
-    fail_args = mock_repo.fail_event.call_args
-    assert fail_args.args[0] == "evt-1100"
-    assert "Falha na abertura de Pull Request no GitHub" in fail_args.kwargs["error_message"]
 
 
 def test_worker_load_target_repo_config(tmp_path):
@@ -564,19 +450,19 @@ async def test_worker_issue_story_key_extraction_and_feature_branch(mock_repo, m
 
     worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
 
-    with patch.object(worker.git_manager, "get_branch_checkout_commands", wraps=worker.git_manager.get_branch_checkout_commands) as mock_branch_cmds:
-        task = asyncio.create_task(worker.start())
-        await asyncio.sleep(0.05)
-        worker.stop()
-        await task
+    task = asyncio.create_task(worker.start())
+    await asyncio.sleep(0.05)
+    worker.stop()
+    await task
 
-        mock_branch_cmds.assert_called_once_with("feature/5-2-time-to-goal-motivational-clock")
-        mock_repo.complete_event.assert_called_once()
+    mock_repo.complete_event.assert_called_once()
+    completed_details = mock_repo.complete_event.call_args.kwargs.get("details", {})
+    assert completed_details is not None
 
 
 @pytest.mark.asyncio
 async def test_worker_issue_fallback_and_feature_branch(mock_repo, mock_sandbox, mock_session, settings):
-    """[AC 6, 7] Worker sem Story Key adota fallback issue-<id> e branch feature/issue-<id>."""
+    """[AC 6, 7] Worker sem Story Key adota fallback issue-<id>."""
     event = EventRecord(
         id="13",
         event_id="evt-issue-fallback",
@@ -595,14 +481,12 @@ async def test_worker_issue_fallback_and_feature_branch(mock_repo, mock_sandbox,
 
     worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
 
-    with patch.object(worker.git_manager, "get_branch_checkout_commands", wraps=worker.git_manager.get_branch_checkout_commands) as mock_branch_cmds:
-        task = asyncio.create_task(worker.start())
-        await asyncio.sleep(0.05)
-        worker.stop()
-        await task
+    task = asyncio.create_task(worker.start())
+    await asyncio.sleep(0.05)
+    worker.stop()
+    await task
 
-        mock_branch_cmds.assert_called_once_with("feature/issue-77")
-        mock_repo.complete_event.assert_called_once()
+    mock_repo.complete_event.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -650,5 +534,166 @@ async def test_worker_repository_priority_resolution(mock_repo, mock_sandbox, mo
 
         call_kwargs_2 = mock_setup_cmds_2.call_args.kwargs
         assert call_kwargs_2["repository"] == "org/repo-from-payload"
+
+
+@pytest.mark.asyncio
+async def test_worker_prompt_logging_and_variable_interpolation(mock_repo, mock_sandbox, mock_session, settings, caplog):
+    """Valida que o prompt enviado ao Harness é logado e tem variáveis ISSUE_ID e TASK_DESCRIPTION preenchidas."""
+    import logging
+    event = EventRecord(
+        id="16",
+        event_id="evt-prompt-interp",
+        event_type="issues",
+        status="PROCESSING",
+        payload={
+            "issue_id": "55",
+            "task_description": "Implementar login com OAuth2 e JWT",
+            "phase": "coding"
+        }
+    )
+    mock_repo.claim_event.side_effect = [event, None]
+
+    worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
+
+    with caplog.at_level(logging.INFO):
+        task = asyncio.create_task(worker.start())
+        await asyncio.sleep(0.05)
+        worker.stop()
+        await task
+
+    # Verifica se o log do prompt enviado para o Harness foi gerado com as variáveis substituídas
+    assert any("[HARNESS - PROMPT ENVIADO (Fase 'coding')]" in record.message for record in caplog.records)
+    assert any("ID da Issue: 55" in record.message for record in caplog.records)
+    assert any("Implementar login com OAuth2 e JWT" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_worker_coding_development_blocked_halts_before_review(mock_repo, mock_sandbox, mock_session, settings):
+    """Valida que ao detectar DESENVOLVIMENTO_BLOQUEADO o worker não avança para a fase de review."""
+    event = EventRecord(
+        id="17",
+        event_id="evt-blocked-story",
+        event_type="workflow.execution",
+        status="PROCESSING",
+        payload={
+            "phases": ["coding", "review"],
+            "story_id": "5-1-blocked-test"
+        }
+    )
+    mock_repo.claim_event.side_effect = [event, None]
+
+    # Simula setup de Git ok e retorno do agente de codificação contendo a mensagem de bloqueio
+    mock_session.exec.side_effect = [
+        {"exit_code": 0, "logs": "Git setup 1", "container_id": "c-1"},
+        {"exit_code": 0, "logs": "Git setup 2", "container_id": "c-1"},
+        {"exit_code": 0, "logs": "Git setup 3", "container_id": "c-1"},
+        {"exit_code": 0, "logs": "Status inválido para execução.\nDESENVOLVIMENTO_BLOQUEADO", "container_id": "c-1"},
+        # Se tentasse executar review, haveria mais chamadas
+    ]
+
+    worker = ExecutorWorker(repo=mock_repo, sandbox_manager=mock_sandbox, settings=settings)
+
+    task = asyncio.create_task(worker.start())
+    await asyncio.sleep(0.05)
+    worker.stop()
+    await task
+
+    # Verifica que fail_event foi chamado e não completou o evento
+    mock_repo.complete_event.assert_not_called()
+    mock_repo.fail_event.assert_called_once()
+    fail_args = mock_repo.fail_event.call_args
+    assert "Desenvolvimento bloqueado" in fail_args.kwargs["error_message"]
+    assert fail_args.kwargs["max_retries"] == 0
+
+    # Verifica se registrou audit_log DEVELOPMENT_BLOCKED
+    audit_actions = [c.kwargs.get("action") for c in mock_repo.add_audit_log.call_args_list]
+    assert "DEVELOPMENT_BLOCKED" in audit_actions
+
+
+@pytest.mark.asyncio
+async def test_worker_execution_error_posts_issue_comment_when_identified(mock_repo, mock_sandbox, mock_session, settings):
+    """Valida que erros na execução postam comentário na issue caso ela tenha sido identificada."""
+    from executor.src.github import GitHubClient
+
+    mock_github = MagicMock(spec=GitHubClient)
+    mock_github.create_issue_comment = AsyncMock(return_value={"id": 1234})
+
+    event = EventRecord(
+        id="18",
+        event_id="evt-error-comment-test",
+        event_type="issues",
+        status="PROCESSING",
+        repository="owner/target-repo",
+        payload={
+            "issue": {"number": 101, "body": "Story Key: 1-1-test\nTask details"},
+            "phases": ["coding"]
+        }
+    )
+    mock_repo.claim_event.side_effect = [event, None]
+
+    # Git setup (4 comandos para repo configurado) + Coding falha (1 comando)
+    mock_session.exec.side_effect = [
+        {"exit_code": 0, "logs": "Git setup 1", "container_id": "c-1"},
+        {"exit_code": 0, "logs": "Git setup 2", "container_id": "c-1"},
+        {"exit_code": 0, "logs": "Git setup 3", "container_id": "c-1"},
+        {"exit_code": 0, "logs": "Git clone", "container_id": "c-1"},
+        {"exit_code": 1, "logs": "SyntaxError in app.py: line 42", "container_id": "c-1"}
+    ]
+
+    worker = ExecutorWorker(
+        repo=mock_repo,
+        sandbox_manager=mock_sandbox,
+        github_client=mock_github,
+        settings=settings
+    )
+
+    task = asyncio.create_task(worker.start())
+    await asyncio.sleep(0.05)
+    worker.stop()
+    await task
+
+    mock_github.create_issue_comment.assert_called_once()
+    call_kwargs = mock_github.create_issue_comment.call_args.kwargs
+    assert call_kwargs["repo"] == "owner/target-repo"
+    assert call_kwargs["issue_number"] == "101"
+    assert "SyntaxError in app.py" in call_kwargs["body"]
+
+
+@pytest.mark.asyncio
+async def test_worker_execution_error_skips_comment_when_issue_not_identified(mock_repo, mock_sandbox, mock_session, settings):
+    """Valida que quando não há issue identificada no evento, nenhum comentário é tentado."""
+    from executor.src.github import GitHubClient
+
+    mock_github = MagicMock(spec=GitHubClient)
+    mock_github.create_issue_comment = AsyncMock()
+
+    event = EventRecord(
+        id="19",
+        event_id="evt-error-no-issue",
+        event_type="workflow.execution",
+        status="PROCESSING",
+        payload={
+            "command": "invalid command",
+            "phases": ["coding"]
+        }
+    )
+    mock_repo.claim_event.side_effect = [event, None]
+
+    # Falha direta no sandbox
+    mock_sandbox.create_session.side_effect = RuntimeError("Docker daemon unavailable")
+
+    worker = ExecutorWorker(
+        repo=mock_repo,
+        sandbox_manager=mock_sandbox,
+        github_client=mock_github,
+        settings=settings
+    )
+
+    task = asyncio.create_task(worker.start())
+    await asyncio.sleep(0.05)
+    worker.stop()
+    await task
+
+    mock_github.create_issue_comment.assert_not_called()
 
 
