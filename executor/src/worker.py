@@ -4,12 +4,12 @@ import yaml
 import asyncio
 import logging
 import re
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from pathlib import Path
 
 from executor.src.config import ExecutorSettings, settings as global_settings
 from executor.src.sandbox import DockerSandboxManager, SandboxSession
-from executor.src.context_loader import ContextLoader
+from executor.src.context_loader import ContextLoader, render_prompt_template
 from executor.src.validation import ValidationPipeline
 from executor.src.memory import AgentMemoryManager
 from executor.src.github import GitHubClient, GitHubAPIError, GitHubAuthError
@@ -33,6 +33,62 @@ def extract_story_id_from_issue(issue_data: Dict[str, Any], fallback_id: str) ->
         return match.group(1).strip().rstrip(".")
     issue_num = issue_data.get("number") or issue_data.get("id") or fallback_id
     return f"issue-{issue_num}"
+
+
+def extract_issue_id(payload: Dict[str, Any], fallback_id: Optional[str] = None) -> Optional[str]:
+    """
+    Extrai o identificador ou número da issue a partir do payload.
+    Retorna None caso não seja identificada uma issue.
+    """
+    if not isinstance(payload, dict):
+        return fallback_id
+
+    # 1. Campo direto issue_id ou issue_number
+    if payload.get("issue_id") is not None and str(payload.get("issue_id")).strip():
+        return str(payload["issue_id"]).strip()
+    if payload.get("issue_number") is not None and str(payload.get("issue_number")).strip():
+        return str(payload["issue_number"]).strip()
+
+    # 2. Objeto aninhado issue
+    issue_obj = payload.get("issue")
+    if isinstance(issue_obj, dict):
+        num = issue_obj.get("number")
+        if num is not None and str(num).strip():
+            return str(num).strip()
+        i_id = issue_obj.get("id")
+        if i_id is not None and str(i_id).strip():
+            return str(i_id).strip()
+
+    return fallback_id
+
+
+def extract_task_description(payload: Dict[str, Any]) -> str:
+    """
+    Extrai a descrição da tarefa a partir do payload.
+    """
+    if not isinstance(payload, dict):
+        return ""
+
+    if payload.get("task_description") is not None and str(payload.get("task_description")).strip():
+        return str(payload["task_description"]).strip()
+
+    issue_obj = payload.get("issue")
+    if isinstance(issue_obj, dict):
+        body = issue_obj.get("body")
+        if body is not None and str(body).strip():
+            return str(body).strip()
+        title = issue_obj.get("title")
+        if title is not None and str(title).strip():
+            return str(title).strip()
+
+    if payload.get("description") is not None and str(payload.get("description")).strip():
+        return str(payload["description"]).strip()
+    if payload.get("body") is not None and str(payload.get("body")).strip():
+        return str(payload["body"]).strip()
+    if payload.get("title") is not None and str(payload.get("title")).strip():
+        return str(payload["title"]).strip()
+
+    return ""
 
 
 class ExecutorWorker:
@@ -151,6 +207,49 @@ class ExecutorWorker:
         if self._sleep_task and not self._sleep_task.done():
             self._sleep_task.cancel()
 
+    async def _notify_issue_error(
+        self,
+        repo_name: Optional[str],
+        issue_id: Optional[str],
+        error_message: str,
+        phase: Optional[str] = None
+    ) -> None:
+        """
+        Envia um comentário para a issue no GitHub caso a issue e o repositório tenham sido identificados.
+        """
+        if not repo_name or not issue_id:
+            logger.info(f"Comentário de erro na issue ignorado (não identificado): repo_name={repo_name}, issue_id={issue_id}")
+            return
+
+        clean_issue_number = str(issue_id).strip()
+        match = re.search(r"(\d+)", clean_issue_number)
+        if match:
+            clean_issue_number = match.group(1)
+        else:
+            logger.warning(f"Não foi possível extrair número de issue válido de '{issue_id}' para comentar no GitHub.")
+            return
+
+        phase_str = f" na fase '{phase}'" if phase else ""
+        comment_body = f"""### ❌ Falha na Execução do AI Developer
+
+Ocorreu um erro durante o processamento autônomo{phase_str}:
+
+```
+{error_message}
+```
+
+*Por favor, verifique as configurações da tarefa ou os logs de execução.*"""
+
+        try:
+            logger.info(f"Registrando comentário de erro na issue #{clean_issue_number} do repositório {repo_name}...")
+            await self.github_client.create_issue_comment(
+                repo=repo_name,
+                issue_number=clean_issue_number,
+                body=comment_body
+            )
+        except Exception as comment_err:
+            logger.warning(f"Falha ao enviar comentário de erro na issue #{clean_issue_number}: {comment_err}")
+
     async def _process_event(self, event: EventRecord) -> None:
         """Processa um evento reivindicado com sessão contínua de sandbox Docker e agente OpenCode."""
         payload = event.payload if isinstance(event.payload, dict) else {}
@@ -172,6 +271,9 @@ class ExecutorWorker:
         token = getattr(self.settings, "GITHUB_TOKEN", None)
 
         # Extrair dados de eventos nativos do GitHub (issues / projects_v2_item)
+        issue_id = extract_issue_id(payload)
+        task_description = extract_task_description(payload)
+
         story_id = payload.get("story_id")
         if not story_id:
             if "issue" in payload and isinstance(payload["issue"], dict):
@@ -181,7 +283,7 @@ class ExecutorWorker:
                 pv2_data = payload["projects_v2_item"]
                 story_id = f"PV2-{pv2_data.get('id', event.event_id)}"
             else:
-                story_id = event.event_id
+                story_id = issue_id or event.event_id
 
         head_branch = payload.get("head_branch") or payload.get("branch") or f"feature/{story_id}"
         base_branch = payload.get("base_branch") or getattr(self.settings, "GITHUB_BASE_BRANCH", "main")
@@ -204,10 +306,15 @@ class ExecutorWorker:
 
         # 1. Carregar bundle de contexto base
         try:
-            initial_context = self.context_loader.build_context_bundle(phase=phases[0] if phases else "coding")
+            initial_context = self.context_loader.build_context_bundle(
+                phase=phases[0] if phases else "coding",
+                issue_id=issue_id or story_id or event.event_id,
+                task_description=task_description
+            )
         except ContextError as err:
             err_msg = f"Falha ao compilar pacote de contexto inicial: {err}"
             logger.error(err_msg)
+            await self._notify_issue_error(repo_name, issue_id, err_msg)
             await self.repo.fail_event(event.event_id, self.settings.WORKER_ID, error_message=err_msg)
             return
 
@@ -228,11 +335,6 @@ class ExecutorWorker:
                 setup_res = session.exec(scmd)
                 if setup_res.get("exit_code", -1) != 0:
                     logger.warning(f"Aviso durante setup de Git no sandbox: {setup_res.get('logs')}")
-
-            # Criar feature branch
-            branch_cmds = self.git_manager.get_branch_checkout_commands(head_branch)
-            for bcmd in branch_cmds:
-                session.exec(bcmd)
 
             # 3.1 Injetar MCPs, Skills e Templates de Prompt diretamente dentro do container /workspace
             if hasattr(session, "inject_context_bundle") and initial_context:
@@ -256,13 +358,38 @@ class ExecutorWorker:
                     except Exception as log_err:
                         logger.warning(f"Erro ao registrar audit_log WORKFLOW_PHASE_STARTED: {log_err}")
 
-                # Garantir que o template de prompt específico da fase está presente em /workspace/prompts/<phase>.md
+                # Carregar e preencher variáveis no template de prompt da fase
                 try:
-                    prompt_file_src = str(self.settings.resolved_prompts_dir / f"{phase}.md")
-                    if os.path.exists(prompt_file_src) and hasattr(session, "copy_file_to_container"):
-                        session.copy_file_to_container(prompt_file_src, f"/workspace/prompts/{phase}.md")
+                    raw_prompt = self.context_loader.load_prompt_template(phase)
+                    rendered_prompt = render_prompt_template(
+                        raw_prompt,
+                        issue_id=issue_id or story_id or event.event_id,
+                        task_description=task_description
+                    )
+                except Exception as p_load_err:
+                    logger.warning(f"Falha ao carregar template para fase '{phase}': {p_load_err}")
+                    rendered_prompt = ""
+
+                # Logar o prompt enviado para o Harness
+                if rendered_prompt:
+                    logger.info(f"[HARNESS - PROMPT ENVIADO (Fase '{phase}')]:\n{rendered_prompt}")
+
+                # Gravar o prompt renderizado em /workspace/prompts/<phase>.md
+                try:
+                    if rendered_prompt:
+                        temp_dir = getattr(session, "temp_dir", None)
+                        if temp_dir and os.path.exists(temp_dir):
+                            prompts_dir_target = os.path.join(temp_dir, "prompts")
+                            os.makedirs(prompts_dir_target, exist_ok=True)
+                            prompt_dst_file = os.path.join(prompts_dir_target, f"{phase}.md")
+                            with open(prompt_dst_file, "w", encoding="utf-8") as pf:
+                                pf.write(rendered_prompt)
+
+                        prompt_file_src = str(self.settings.resolved_prompts_dir / f"{phase}.md")
+                        if os.path.exists(prompt_file_src) and hasattr(session, "copy_file_to_container"):
+                            session.copy_file_to_container(prompt_file_src, f"/workspace/prompts/{phase}.md")
                 except Exception as p_err:
-                    logger.warning(f"Aviso ao copiar prompt da fase '{phase}': {p_err}")
+                    logger.warning(f"Aviso ao preparar prompt da fase '{phase}': {p_err}")
 
                 # Montar comando do OpenCode para a fase
                 phase_env = self.agent_runner.get_phase_env_vars(phase=phase, story_id=story_id, base_env=env_vars)
@@ -292,11 +419,30 @@ class ExecutorWorker:
                     "container_id": session.id
                 })
 
+                # Verificar se o agente sinalizou bloqueio de desenvolvimento
+                if "DESENVOLVIMENTO_BLOQUEADO" in logs:
+                    blocked_msg = f"Desenvolvimento bloqueado detectado no retorno do agente (Fase '{phase}')."
+                    logger.warning(f"{blocked_msg} Interrompendo execução e não avançando para a fase de review.")
+                    if hasattr(self.repo, "add_audit_log"):
+                        try:
+                            await self.repo.add_audit_log(
+                                event_id=event.event_id,
+                                action="DEVELOPMENT_BLOCKED",
+                                actor=self.settings.WORKER_ID,
+                                details={"phase": phase, "story_id": story_id, "logs": logs[:1000]}
+                            )
+                        except Exception as log_err:
+                            logger.warning(f"Erro ao registrar audit_log DEVELOPMENT_BLOCKED: {log_err}")
+
+                    await self.repo.fail_event(event.event_id, self.settings.WORKER_ID, error_message=blocked_msg, max_retries=0)
+                    return
+
                 if exit_code != 0:
                     err_msg = f"Fase '{phase}' falhou no sandbox (exit code {exit_code}): {logs}"
                     if len(err_msg) > 2000:
                         err_msg = err_msg[:2000] + "... [truncado]"
                     logger.warning(f"Evento {event.event_id} falhou na fase '{phase}': {err_msg}")
+                    await self._notify_issue_error(repo_name, issue_id, err_msg, phase=phase)
                     await self.repo.fail_event(event.event_id, self.settings.WORKER_ID, error_message=err_msg)
                     return
 
@@ -335,77 +481,7 @@ class ExecutorWorker:
                     if push_res.get("exit_code", -1) != 0:
                         logger.warning(f"Aviso no Git Push: {push_res.get('logs')}")
 
-            # 7. Abertura Semântica do Pull Request (Story 3.2)
-            is_dry_run = getattr(self.settings, "GITHUB_DRY_RUN", False) or getattr(self.github_client, "dry_run", False)
-            client_token = getattr(self.github_client, "token", None)
-            has_token = bool(client_token) if client_token is not None else bool(token)
-            is_mock_client = hasattr(self.github_client, "_mock_name") or hasattr(self.github_client, "return_value")
-            pr_info = None
-
-            if is_dry_run or (has_token and repo_name) or (is_mock_client and repo_name):
-                target_repo = repo_name or "local/repo"
-                title_text = payload.get("title") or payload.get("story_title") or f"Story {story_id}"
-                project_item_id = payload.get("project_item_id") or payload.get("project_card_id")
-                target_project_id = (
-                    target_repo_config.get("github", {}).get("project_id")
-                    if isinstance(target_repo_config.get("github"), dict)
-                    else target_repo_config.get("project_id")
-                )
-                project_id = payload.get("project_id") or target_project_id or getattr(self.settings, "GITHUB_PROJECT_ID", None)
-
-                pr_title = self.github_client.generate_pr_title(story_id=story_id, title=title_text)
-                pr_body = self.github_client.format_semantic_pr_body(
-                    story_id=story_id,
-                    title=title_text,
-                    phase_results=phase_results,
-                    review_summary=review_summary,
-                    project_item_id=project_item_id
-                )
-
-                try:
-                    pr_info = await self.github_client.create_pull_request(
-                        repo=target_repo,
-                        title=pr_title,
-                        body=pr_body,
-                        head_branch=head_branch,
-                        base_branch=base_branch
-                    )
-                    logger.info(f"Pull Request criado com sucesso: {pr_info.get('pr_html_url') or pr_info.get('pr_url')}")
-
-                    if hasattr(self.repo, "add_audit_log"):
-                        try:
-                            await self.repo.add_audit_log(
-                                event_id=event.event_id,
-                                action="PR_CREATED",
-                                actor=self.settings.WORKER_ID,
-                                details={"story_id": story_id, "pr_url": pr_info.get("pr_html_url") or pr_info.get("pr_url")}
-                            )
-                        except Exception as log_err:
-                            logger.warning(f"Erro ao registrar audit_log PR_CREATED: {log_err}")
-
-                except Exception as pr_err:
-                    err_msg = f"Falha na abertura de Pull Request no GitHub: {pr_err}"
-                    logger.error(err_msg)
-                    if hasattr(self.repo, "add_audit_log"):
-                        try:
-                            await self.repo.add_audit_log(
-                                event_id=event.event_id,
-                                action="PR_FAILED",
-                                actor=self.settings.WORKER_ID,
-                                details={"story_id": story_id, "error": str(pr_err)}
-                            )
-                        except Exception as log_err:
-                            logger.warning(f"Erro ao registrar audit_log PR_FAILED: {log_err}")
-                    await self.repo.fail_event(event.event_id, self.settings.WORKER_ID, error_message=err_msg)
-                    return
-
-            if pr_info:
-                summary_data["pr_url"] = pr_info.get("pr_html_url") or pr_info.get("pr_url")
-                summary_data["pr_number"] = pr_info.get("pr_number")
-                summary_data["pull_request_status"] = "OPEN"
-                summary_data["head_branch"] = pr_info.get("head_branch")
-
-            # 8. Persistência de Memória Hierárquica
+            # 7. Persistência de Memória Hierárquica
             await self.memory_manager.record_daily_summary(
                 story_id=story_id,
                 summary_data=summary_data,
@@ -434,7 +510,9 @@ class ExecutorWorker:
         except Exception as exc:
             err_msg = f"Exceção durante o processamento do evento {event.event_id}: {str(exc)}"
             logger.error(err_msg, exc_info=True)
+            await self._notify_issue_error(repo_name, issue_id, err_msg)
             await self.repo.fail_event(event.event_id, self.settings.WORKER_ID, error_message=err_msg)
+
 
         finally:
             # 10. Teardown Completo do Sandbox

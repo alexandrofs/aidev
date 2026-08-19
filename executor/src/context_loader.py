@@ -10,6 +10,25 @@ from executor.src.exceptions import ContextError, PromptTemplateNotFoundError, I
 logger = logging.getLogger(__name__)
 
 
+def render_prompt_template(
+    template_content: str,
+    issue_id: Optional[str] = None,
+    task_description: Optional[str] = None
+) -> str:
+    """
+    Substitui com segurança as variáveis de contexto no template de prompt.
+    {ISSUE_ID} -> ID/número da issue
+    {TASK_DESCRIPTION} -> Descrição da tarefa
+    """
+    rendered = template_content
+    effective_issue_id = str(issue_id).strip() if issue_id is not None else ""
+    effective_task_desc = str(task_description).strip() if task_description is not None else ""
+
+    rendered = rendered.replace("{ISSUE_ID}", effective_issue_id)
+    rendered = rendered.replace("{TASK_DESCRIPTION}", effective_task_desc)
+    return rendered
+
+
 class ContextLoader:
     def __init__(self, settings_override: Optional[ExecutorSettings] = None):
         self.settings = settings_override or settings
@@ -93,7 +112,13 @@ class ContextLoader:
             phase_name = Path(mandatory_prompt).stem
             self.load_prompt_template(phase_name, prompts_dir=prompts_dir)
 
-    def build_context_bundle(self, phase: str, base_dir: Optional[str] = None) -> Dict[str, Any]:
+    def build_context_bundle(
+        self,
+        phase: str,
+        base_dir: Optional[str] = None,
+        issue_id: Optional[str] = None,
+        task_description: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Compiles complete context bundle with MCPs, Skills and phase Prompt."""
         prompts_dir = str(Path(base_dir) / self.settings.PROMPTS_DIR) if base_dir else None
         skills_dir = str(Path(base_dir) / self.settings.SKILLS_DIR) if base_dir else None
@@ -101,6 +126,8 @@ class ContextLoader:
 
         self.validate_mandatory_prompts(prompts_dir=prompts_dir)
         prompt_content = self.load_prompt_template(phase, prompts_dir=prompts_dir)
+        if issue_id is not None or task_description is not None:
+            prompt_content = render_prompt_template(prompt_content, issue_id=issue_id, task_description=task_description)
 
         mcp_config = self.load_mcp_config(mcp_config_path=mcp_path)
         skills_catalog = self.discover_skills(skills_dir=skills_dir)
@@ -109,7 +136,10 @@ class ContextLoader:
         prompts_dict = {}
         for p_name in self.settings.MANDATORY_PROMPTS:
             phase_key = Path(p_name).stem
-            prompts_dict[phase_key] = self.load_prompt_template(phase_key, prompts_dir=prompts_dir)
+            raw_prompt = self.load_prompt_template(phase_key, prompts_dir=prompts_dir)
+            if issue_id is not None or task_description is not None:
+                raw_prompt = render_prompt_template(raw_prompt, issue_id=issue_id, task_description=task_description)
+            prompts_dict[phase_key] = raw_prompt
 
         return {
             "phase": phase,
@@ -118,3 +148,4 @@ class ContextLoader:
             "skills": skills_catalog,
             "prompts": prompts_dict
         }
+

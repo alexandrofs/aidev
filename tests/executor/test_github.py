@@ -397,3 +397,83 @@ async def test_update_project_card_enterprise_graphql_url():
         )
         assert mock_post.call_args.args[0] == "https://github.enterprise.com/api/graphql"
 
+
+@pytest.mark.asyncio
+async def test_create_issue_comment_success():
+    """Valida criação bem-sucedida de comentário em issue do GitHub."""
+    settings = ExecutorSettings(GITHUB_TOKEN="ghp_test_token", PROJECT_ROOT="/tmp")
+    client = GitHubClient(settings=settings)
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 201
+    mock_resp.json.return_value = {
+        "id": 123456,
+        "body": "Comentário de teste",
+        "html_url": "https://github.com/org/repo/issues/42#issuecomment-123456",
+        "issue_url": "https://api.github.com/repos/org/repo/issues/42"
+    }
+    mock_resp.is_error = False
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        res = await client.create_issue_comment(
+            repo="org/repo",
+            issue_number=42,
+            body="Comentário de teste"
+        )
+        assert res["id"] == 123456
+        assert res["body"] == "Comentário de teste"
+        assert mock_post.call_args.args[0] == "https://api.github.com/repos/org/repo/issues/42/comments"
+        assert mock_post.call_args.kwargs["json"]["body"] == "Comentário de teste"
+
+
+@pytest.mark.asyncio
+async def test_create_issue_comment_dry_run():
+    """Valida retorno simulado de comentário em issue quando dry_run está ativo."""
+    settings = ExecutorSettings(GITHUB_DRY_RUN=True, PROJECT_ROOT="/tmp")
+    client = GitHubClient(settings=settings)
+
+    res = await client.create_issue_comment(
+        repo="org/repo",
+        issue_number="99",
+        body="Erro no dry run"
+    )
+    assert res["dry_run"] is True
+    assert res["id"] == 999999
+    assert res["body"] == "Erro no dry run"
+
+
+@pytest.mark.asyncio
+async def test_create_issue_comment_missing_token():
+    """Valida que falta de token lança GitHubAuthError quando dry_run é falso."""
+    settings = ExecutorSettings(GITHUB_TOKEN=None, GITHUB_DRY_RUN=False, PROJECT_ROOT="/tmp")
+    client = GitHubClient(settings=settings)
+
+    with pytest.raises(GitHubAuthError, match="GitHub token não configurado"):
+        await client.create_issue_comment(
+            repo="org/repo",
+            issue_number=42,
+            body="Falha"
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_issue_comment_api_error():
+    """Valida tratamento de erro HTTP da API ao comentar em issue."""
+    settings = ExecutorSettings(GITHUB_TOKEN="ghp_test_token", PROJECT_ROOT="/tmp")
+    client = GitHubClient(settings=settings)
+
+    mock_resp = MagicMock(spec=httpx.Response)
+    mock_resp.status_code = 500
+    mock_resp.text = "Internal Server Error"
+    mock_resp.is_error = True
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value = mock_resp
+        with pytest.raises(GitHubAPIError, match="Erro retornado pela API"):
+            await client.create_issue_comment(
+                repo="org/repo",
+                issue_number=42,
+                body="Falha"
+            )
+

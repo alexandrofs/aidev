@@ -4,7 +4,7 @@ import tempfile
 import pytest
 from executor.src.config import ExecutorSettings
 from executor.src.exceptions import ContextError, PromptTemplateNotFoundError, InvalidMCPConfigError
-from executor.src.context_loader import ContextLoader
+from executor.src.context_loader import ContextLoader, render_prompt_template
 
 
 def test_executor_settings_context_defaults():
@@ -95,24 +95,40 @@ def test_load_prompt_template_empty_throws():
             loader.load_prompt_template("coding", prompts_dir=tmpdir)
 
 
+def test_render_prompt_template():
+    template = "# Tarefa {ISSUE_ID}\n\nDescrição:\n{TASK_DESCRIPTION}\n\nBranch: feature/{STORY_KEY}"
+    rendered = render_prompt_template(
+        template,
+        issue_id="123",
+        task_description="Implementar autenticação JWT"
+    )
+    assert "Tarefa 123" in rendered
+    assert "Implementar autenticação JWT" in rendered
+    assert "feature/{STORY_KEY}" in rendered  # Outras tags preservadas
+
+    rendered_empty = render_prompt_template(template)
+    assert "Tarefa " in rendered_empty
+    assert "feature/{STORY_KEY}" in rendered_empty
+
+
 def test_build_context_bundle_success():
     loader = ContextLoader()
-    # Uses actual project prompts directory by default settings
-    bundle = loader.build_context_bundle("coding")
+    bundle = loader.build_context_bundle("coding", issue_id="42", task_description="Criar endpoint de teste")
     assert bundle["phase"] == "coding"
-    assert "Coding Prompt Template" in bundle["prompt_template"]
-    assert "bmad-dev-story" in bundle["prompt_template"]
+    assert "bmad-agent-dev" in bundle["prompt_template"]
     assert "Red-Green-Refactor" in bundle["prompt_template"]
+    assert "ID da Issue: 42" in bundle["prompt_template"]
+    assert "Criar endpoint de teste" in bundle["prompt_template"]
     assert "mcp_config" in bundle
     assert "skills" in bundle
 
 
 def test_review_prompt_template_content():
     loader = ContextLoader()
-    bundle = loader.build_context_bundle("review")
+    bundle = loader.build_context_bundle("review", issue_id="42", task_description="Revisar código")
     assert bundle["phase"] == "review"
-    assert "Review Prompt Template" in bundle["prompt_template"]
-    assert "bmad-code-review" in bundle["prompt_template"]
+    assert "bmad-agent-dev" in bundle["prompt_template"]
     assert "Zero Deferred Work" in bundle["prompt_template"]
-    assert "NÃO abra Pull Request" in bundle["prompt_template"]
+    assert "ID da Issue: 42" in bundle["prompt_template"]
+
 
