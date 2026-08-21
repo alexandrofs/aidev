@@ -118,6 +118,35 @@ class SandboxSession:
                 return False
         return True
 
+    def write_text_to_container(self, content: str, dst_path: str) -> bool:
+        """
+        Escreve um conteúdo de texto diretamente em um arquivo dentro do volume do container usando a API do Docker.
+        """
+        if self.closed:
+            raise RuntimeError("Tentativa de escrever arquivo em SandboxSession já encerrada.")
+
+        if hasattr(self.container, "put_archive"):
+            try:
+                import io, tarfile
+                dst_dir = os.path.dirname(dst_path) or "/"
+                dst_name = os.path.basename(dst_path)
+
+                self.exec(f"mkdir -p '{dst_dir}'")
+
+                stream = io.BytesIO()
+                encoded_bytes = content.encode("utf-8")
+                with tarfile.open(fileobj=stream, mode="w") as tar:
+                    tarinfo = tarfile.TarInfo(name=dst_name)
+                    tarinfo.size = len(encoded_bytes)
+                    tar.addfile(tarinfo, io.BytesIO(encoded_bytes))
+                stream.seek(0)
+
+                return self.container.put_archive(dst_dir, stream.getvalue())
+            except Exception as e:
+                logger.error(f"Erro ao escrever texto no container ({dst_path}): {e}")
+                return False
+        return True
+
     def copy_directory_to_container(self, src_dir: str, dst_dir: str) -> bool:
         """
         Copia um diretório inteiro local diretamente para o volume do container usando a API do Docker (docker cp).

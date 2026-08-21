@@ -385,9 +385,8 @@ Ocorreu um erro durante o processamento autônomo{phase_str}:
                             with open(prompt_dst_file, "w", encoding="utf-8") as pf:
                                 pf.write(rendered_prompt)
 
-                        prompt_file_src = str(self.settings.resolved_prompts_dir / f"{phase}.md")
-                        if os.path.exists(prompt_file_src) and hasattr(session, "copy_file_to_container"):
-                            session.copy_file_to_container(prompt_file_src, f"/workspace/prompts/{phase}.md")
+                        if hasattr(session, "write_text_to_container"):
+                            session.write_text_to_container(rendered_prompt, f"/workspace/prompts/{phase}.md")
                 except Exception as p_err:
                     logger.warning(f"Aviso ao preparar prompt da fase '{phase}': {p_err}")
 
@@ -467,21 +466,7 @@ Ocorreu um erro durante o processamento autônomo{phase_str}:
             if "review" in phases:
                 summary_data["review_summary"] = review_summary
 
-            # 6. Commit e Push no Sandbox
-            if repo_name and token:
-                logger.info(f"Comitando e fazendo push do branch {head_branch}...")
-                push_cmds = self.git_manager.get_commit_and_push_commands(
-                    branch_name=head_branch,
-                    commit_message=f"feat({story_id}): {summary_data['title']}",
-                    repository=repo_name,
-                    token=token
-                )
-                for pcmd in push_cmds:
-                    push_res = session.exec(pcmd)
-                    if push_res.get("exit_code", -1) != 0:
-                        logger.warning(f"Aviso no Git Push: {push_res.get('logs')}")
-
-            # 7. Persistência de Memória Hierárquica
+            # 6. Persistência de Memória Hierárquica
             await self.memory_manager.record_daily_summary(
                 story_id=story_id,
                 summary_data=summary_data,

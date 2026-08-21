@@ -153,3 +153,19 @@ def test_sandbox_execute_job_log_truncation_and_timeout():
     assert result["exit_code"] == -1
     assert len(result["logs"]) > 100
     assert "logs truncados pelo executor" in result["logs"]
+
+
+def test_sandbox_session_write_text_to_container():
+    from executor.src.sandbox import SandboxSession
+    mock_container = MagicMock()
+    mock_container.id = "test_session_write_text"
+    mock_container.put_archive.return_value = True
+
+    session = SandboxSession(container=mock_container, temp_dir="/tmp/fake_dir")
+    success = session.write_text_to_container("Conteúdo renderizado do prompt", "/workspace/prompts/coding.md")
+
+    assert success is True
+    mock_container.put_archive.assert_called_once()
+    call_args = mock_container.put_archive.call_args
+    assert call_args[0][0] == "/workspace/prompts"
+
