@@ -66,6 +66,7 @@ services:
       OPENCODE_API_KEY: ${OPENCODE_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENCODE_MODEL: ${OPENCODE_MODEL:-}
+      OPENCODE_RUN_COMMAND: ${OPENCODE_RUN_COMMAND:-opencode run "$$(cat {prompt_path})" --auto}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
